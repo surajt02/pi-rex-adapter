@@ -1,63 +1,88 @@
 import { open, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
-// A child's token count is read from its own Pi session file. The widget shows
-// the current working set, so only the LAST usage record matters: no summing, no
-// full-file read, no per-token bookkeeping in run.json.
+// A child's numbers come from its own Pi session file: the token count of its
+// last assistant message, plus how many turns and tool calls it has taken.
 //
-// Files reach ~350 KB, so the tail is read instead of the whole file, and the
-// parse result is cached against size+mtime to keep a redrawing widget cheap.
+// Tokens are a working set, not a sum, so the last usage record wins. Turns and
+// tool uses are counts, so they are accumulated. Both are derived from one pass
+// over the file that only ever reads bytes it has not read before: the first
+// scan of a ~350 KB session costs a few milliseconds, every later scan reads the
+// appended tail and a stat.
 
-const TAIL = 64 * 1024;
-const DEEP_TAIL = 512 * 1024;
 const cache = new Map();
 
 export function clearUsageCache() {
   cache.clear();
 }
 
-function lastUsage(text) {
-  const lines = text.split('\n');
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (!line || line[0] !== '{') continue;
-    let entry;
-    try { entry = JSON.parse(line); } catch { continue; }
-    const usage = entry?.message?.usage;
-    if (!usage || !Number.isFinite(usage.totalTokens)) continue;
-    return { tokens: usage.totalTokens, at: entry.message.timestamp || entry.timestamp };
+const empty = () => ({ tokens: undefined, turns: 0, toolUses: 0, at: undefined });
+
+function account(state, entry) {
+  const message = entry?.message;
+  if (!message || message.role !== 'assistant') return;
+  state.turns += 1;
+  for (const part of Array.isArray(message.content) ? message.content : []) {
+    if (part && (part.type === 'toolCall' || part.type === 'tool_use' || part.type === 'tool_call')) state.toolUses += 1;
   }
-  return undefined;
+  const usage = message.usage;
+  if (usage && Number.isFinite(usage.totalTokens)) {
+    state.tokens = usage.totalTokens;
+    state.at = message.timestamp || entry.timestamp;
+  }
 }
 
-async function tail(path, bytes, size) {
-  const start = Math.max(0, size - bytes);
+function absorb(state, text) {
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed[0] !== '{') continue;
+    let entry;
+    try { entry = JSON.parse(trimmed); } catch { continue; }
+    account(state, entry);
+  }
+}
+
+async function readFrom(path, offset, size) {
   const handle = await open(path, 'r');
   try {
-    const buffer = Buffer.alloc(size - start);
-    await handle.read(buffer, 0, buffer.length, start);
-    const text = buffer.toString('utf8');
-    if (start === 0) return text;
-    // The first line of a tail is almost always partial; drop it.
-    const newline = text.indexOf('\n');
-    return newline === -1 ? '' : text.slice(newline + 1);
+    const buffer = Buffer.alloc(Math.max(0, size - offset));
+    if (!buffer.length) return '';
+    await handle.read(buffer, 0, buffer.length, offset);
+    return buffer.toString('utf8');
   } finally {
     await handle.close();
   }
+}
+
+// A whole file read once, then only its new tail. A half-written last line is
+// held back so its counts are not lost or double counted.
+async function advance(path, info) {
+  const hit = cache.get(path);
+  if (hit && hit.size === info.size && hit.mtimeMs === info.mtimeMs) return hit.counts;
+
+  // Continue from where the last scan stopped; a shrunk or replaced file starts over.
+  const resume = Boolean(hit) && info.size >= hit.offset;
+  const state = resume ? hit.counts : empty();
+  const offset = resume ? hit.offset : 0;
+  const carry = resume ? hit.carry || '' : '';
+
+  const text = await readFrom(path, offset, info.size);
+  const combined = carry + text;
+  const newline = combined.lastIndexOf('\n');
+  if (newline !== -1) absorb(state, combined.slice(0, newline));
+  cache.set(path, {
+    size: info.size, mtimeMs: info.mtimeMs, counts: state, offset: info.size,
+    carry: newline === -1 ? combined : combined.slice(newline + 1),
+  });
+  return state;
 }
 
 export async function readUsage(dir) {
   const path = join(dir, 'session.jsonl');
   let info;
   try { info = await stat(path); } catch { return {}; }
-  const hit = cache.get(path);
-  if (hit && hit.size === info.size && hit.mtimeMs === info.mtimeMs) return hit.value;
-  let value = {};
   try {
-    value = lastUsage(await tail(path, TAIL, info.size))
-      || (info.size > TAIL ? lastUsage(await tail(path, DEEP_TAIL, info.size)) : undefined)
-      || {};
-  } catch { value = {}; }
-  cache.set(path, { size: info.size, mtimeMs: info.mtimeMs, value });
-  return value;
+    // A copy: callers must not mutate the counts the cache keeps adding to.
+    return { ...(await advance(path, info)) };
+  } catch { return {}; }
 }

@@ -99,6 +99,29 @@ BTW 回传是可选操作：普通回答结束后提示“答案已就绪 · 可
 
 `/rex-agent` 在 Agents 分组 tab 的独立 terminal block 中启动完整交互式 Pi（不使用 `--print`）。每轮任务 settled 后自动回传该轮回答，Pi 会话保持打开；可聚焦该 block 继续输入下一轮，后续回答也分别回传。主 agent 检查完交付、无需该 agent 继续下一轮时，应及时调用 `rex_finish` 关闭该 block；关闭后文件、结果与 Pi 会话记录仍保留，主 agent 可以继续集成或测试，无需等整个主任务结束才关窗。这是工具说明和结果通知中的收尾约定，不是强制自动关闭，也不会反复发送提醒。工具会检查任务已完成且进程 idle/已退出，不会关闭正在运行的任务或 BTW。这由主 agent 调用执行，不是子进程自行关闭。子进程默认不注册本 adapter 的委派工具。子任务共享工作目录；并行写入请通过工具的 `cwd` 指定事先准备的独立 checkout。此版本不自动管理 worktree、角色包、模型 fallback 或持久 specialist。
 
+## 会话中的启动记录
+
+委派任务在对话里就是一条记录，而不是一段 JSON。`subagent` 显示一个 agent，`pipeline` 显示标题与每个步骤：
+
+```
+● Pipeline · dot cycle check · 2/2 done (ctrl+o to expand)
+  ├ ● List overview exports (scout)
+      ⎿ Done · deepseek-v4.1-flash · 2 turns · 1 tool use · 3.0k token · 6s
+  └ ● Check export usage (scout)
+      ⎿ Done · deepseek-v4.1-flash · 2 turns · 1 tool use · 6.7k token · 12s
+```
+
+单个 agent 没有额外标题，图形本身已经表示状态：
+
+```
+✳ Review plan vs code (reviewer) (ctrl+o to expand)
+  ⎿ Running · mimo-v2.6-pro · 8 turns · 11 tool uses · 41.2k token
+```
+
+图形与界面其他位置同一套点状动画：运行中旋转，完成变绿，失败或中断变红，尚未开始为空心。`⎿` 行给出状态词、模型、子会话已用轮数与工具调用数、当前 token 数，结束后再给出耗时。这些数字读自子会话文件，变化时该行自动重绘，长链条不会卡在 “Running”。尚未启动的步骤显示 `Waiting for the previous step`，而不是一堆 0。
+
+窄于 90 列时先省略模型名。`ctrl+o` 展开每个 agent 报告的前六行，并说明省略了多少行；完整文本仍在结果消息和 `rex_tasks` 中。
+
 ## 主页面任务概览
 
 父 Pi 输入框上方展示所有 pane 仍打开的 Agent / Shell 任务，因此等待收尾的已完成 agent、卡住或失败的 pane 都会留在列表中，直到关闭；BTW 在自己的分屏中，不出现在这里。全部关闭后整块列表消失，历史记录保留。

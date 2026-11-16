@@ -141,6 +141,29 @@ The command process exits when it finishes. The adapter closes its block once th
 
 Use this for commands you choose to start in the background. **The adapter does not take over an already-running native `bash` command or implement Ctrl+B/timeout-based backgrounding.** It does not rerun an existing command to make it a background task.
 
+## Launches in the transcript
+
+A delegated launch is a row in the conversation, not a JSON blob. `subagent` shows one agent; `pipeline` shows its header and every step beneath it:
+
+```
+● Pipeline · dot cycle check · 2/2 done (ctrl+o to expand)
+  ├ ● List overview exports (scout)
+      ⎿ Done · deepseek-v4.1-flash · 2 turns · 1 tool use · 3.0k token · 6s
+  └ ● Check export usage (scout)
+      ⎿ Done · deepseek-v4.1-flash · 2 turns · 1 tool use · 6.7k token · 12s
+```
+
+A single agent has no header of its own, because its glyph already carries the state:
+
+```
+✳ Review plan vs code (reviewer) (ctrl+o to expand)
+  ⎿ Running · mimo-v2.6-pro · 8 turns · 11 tool uses · 41.2k token
+```
+
+The glyph is the same dot cycle as the rest of the UI: spinning while the agent runs, filled green when it finished, red when it failed or was interrupted, hollow for a step that has not started. The `⎿` line carries the state word, the model, how many turns and tool calls the child has taken, its current token count, and — once it finishes — how long it ran. Those numbers are read from the child's own session file, and the row repaints itself when they change, so a long chain updates in place instead of freezing at "Running". A step that has not launched says `Waiting for the previous step` rather than showing zeros.
+
+Below 90 columns the model name is dropped to keep the numbers. `ctrl+o` expands each agent to the first six lines of its report, with a count of anything it left out; the full text is always in the result message and in `rex_tasks`.
+
 ## Task overview and controls
 
 Above the parent's editor, the list shows every Agent and Shell task whose pane is still open, so a completed agent awaiting review and a stuck or failed pane stay visible until you close them. BTW conversations live in their own split and never appear here. When nothing is open, the list disappears. History is retained.
@@ -177,7 +200,7 @@ The overview reflects the child's last reported activity. Opening it does not in
 
 | Tool | Parameters and behavior |
 | --- | --- |
-| `subagent` | `task,label`; optional `agent,name,cwd,model,fork`. Starts an interactive Pi with automatic reports. `label` is required and must be six words or fewer: it is the goal shown in the parent list. `agent` picks a role from `~/.pi/agent/agents/*.md`. |
+| `subagent` | `task,label`; optional `agent,name,cwd,model,fork`. Starts an interactive Pi with automatic reports; the launch appears in the transcript with live state, turns, tool uses and tokens. `label` is required and must be six words or fewer: it is the goal shown in the parent list. `agent` picks a role from `~/.pi/agent/agents/*.md`. |
 | `btw` | The same optional fields; omit `task` to focus, or supply a question to reuse the right-side conversation. Reports are explicit. |
 | `pipeline` | `steps[]` of `{agent,task,label,model}`, plus optional `title,cwd,model,fork`. Runs the steps in order, one pane each, and delivers one combined report. Every step needs a label of six words or fewer. |
 | `bg_run` | `command`; optional `name,cwd`. Starts a shell job with automatic completion delivery. |

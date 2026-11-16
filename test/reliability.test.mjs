@@ -397,3 +397,46 @@ test('runner termination reaches shell descendants in its isolated process group
   });
   assert.match((await readJson(join(h.run.dir, 'exit.json'))).error, /SIGTERM/);
 });
+
+test('a launch is a row in the transcript: it names the goal, then reports what it did', async t => {
+  inRex(t);
+  const { join } = await import('node:path');
+  const opened = [];
+  const rex = {
+    async open(run) { opened.push(run); return 'block-1'; },
+    async inspect() { return { window: 'window-1' }; },
+    async control() {},
+    events() { return () => {}; },
+  };
+  const h = await fixture(t, rex);
+  await h.events.session_start({}, h.ctx);
+  const params = { task: 'Review the diff carefully', label: 'Review the diff' };
+  const started = await h.call('subagent', params);
+  assert.equal(started.details.status, 'running');
+
+  // Pi calls the two slots with the tool call's id and expects a component back.
+  const theme = { fg: (token, text) => `<${token}>${text}`, bold: text => `<b>${text}</b>` };
+  let repaints = 0;
+  const context = { toolCallId: 'call', expanded: false, invalidate() { repaints++; },
+    keyHint: (id, what) => (id === 'app.tools.expand' ? `ctrl+o ${what}` : '') };
+  const header = h.tools.subagent.renderCall(params, theme, context);
+  const body = h.tools.subagent.renderResult({ content: [], details: started.details }, { expanded: false }, theme, context);
+  assert.match(header.render(100)[0], /Review the diff/, 'the header names the goal, not the task text');
+  assert.match(body.render(100)[0], /Starting/, 'before the first scan the row says so rather than inventing numbers');
+
+  // The child writes its numbers; the adapter repaints the row it already drew.
+  const dir = join(h.root, started.details.id);
+  await atomicJson(join(dir, 'result.json'), { text: 'Two tests only cover the happy path.', status: 'completed', createdAt: new Date().toISOString() });
+  await atomicJson(join(dir, 'activity.json'), { task: 'completed', process: 'idle' });
+  await writeFile(join(dir, 'session.jsonl'), [
+    JSON.stringify({ type: 'message', message: { role: 'assistant', content: [{ type: 'toolCall', id: 'a' }], usage: { totalTokens: 5400 } } }),
+    JSON.stringify({ type: 'message', message: { role: 'assistant', content: [], usage: { totalTokens: 6800 } } }),
+  ].join('\n') + '\n');
+  await until(() => body.render(100).join('').includes('Done'));
+  assert.ok(repaints > 0, 'the row repainted itself instead of waiting for the TUI');
+  assert.match(header.render(100)[0].replace(/<[a-z]+>/g, ''), /^● Review the diff/, 'the glyph settles when the run does');
+  assert.match(body.render(100)[0].replace(/<[a-z]+>/g, ''), /Done · .*2 turns · 1 tool use · 6\.8k token · \d+s/);
+
+  const expanded = h.tools.subagent.renderResult({ content: [], details: started.details }, { expanded: true }, theme, context);
+  assert.match(expanded.render(100).join('\n'), /Two tests only cover the happy path/, 'ctrl+o shows the report');
+});

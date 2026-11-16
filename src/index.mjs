@@ -15,7 +15,8 @@ import { directRun, observeLifecycles } from './lifecycle.mjs';
 import { createDialogs } from './dialog.mjs';
 import { DEFAULT_CONFIG, loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
-import { taskRow, showOverview, activeOverviewRows, visibleRows, orderRows, rowLabel, plain, fit } from './overview.mjs';
+import { taskRow, showOverview, activeOverviewRows, visibleRows, orderRows, rowLabel, plain, fit, buildGroups } from './overview.mjs';
+import { agentSnapshot, agentBody, agentHeader, pipelineBody, pipelineHeader, fingerprint, component } from './transcript.mjs';
 
 const runner = fileURLToPath(new URL('./runner.mjs', import.meta.url));
 const textResult = value => ({ content: [{ type: 'text', text: JSON.stringify(value) }], details: value });
@@ -35,6 +36,10 @@ export default function adapter(pi, dependencies = {}) {
   let actionTimer, taskPanel;
   let overviewEnabled = true, overviewRows = [], chainMap = new Map();
   const inbox = new Map();
+  // One entry per rendered tool call, keyed by Pi's toolCallId: the agents to
+  // draw, the last fingerprint drawn, and the invalidators of the two slots
+  // (header and body) so a state change repaints the row in place.
+  const transcriptRows = new Map();
   const closing = new Map();
   const chainSeen = new Set();
   const chainWork = new Map();
@@ -114,6 +119,53 @@ export default function adapter(pi, dependencies = {}) {
     const count = activeOverviewRows(overviewRows).length;
     const status = count ? ui('active', { count }) : undefined;
     if (current?.hasUI && status !== statusText) { current.ui.setStatus('rex', status); statusText = status; }
+  }
+  function transcriptAgents(entry) {
+    if (!entry) return undefined;
+    if (entry.kind === 'agent') {
+      const row = overviewRows.find(candidate => candidate.id === entry.runId);
+      if (!row) return undefined;
+      return { agents: [agentSnapshot({
+        label: row.label, role: row.role, model: row.model, state: row.taskState,
+        tokens: row.tokens, turns: row.turns, toolUses: row.toolUses,
+        seconds: row.endedAt ? elapsedSeconds(row) : undefined, text: row.result,
+      })] };
+    }
+    const group = buildGroups(overviewRows, chainMap).groups.find(candidate => candidate.id === entry.chainId);
+    if (!group) return undefined;
+    return { title: group.title, done: group.done, total: group.total, agents: group.steps.map(step => agentSnapshot({
+      label: step.label, role: step.row?.role || step.agent, model: step.row?.model, state: step.state,
+      tokens: step.row?.tokens, turns: step.row?.turns, toolUses: step.row?.toolUses,
+      seconds: step.row?.endedAt ? elapsedSeconds(step.row) : undefined,
+      text: step.row?.result || (step.state === 'failed' ? step.row?.error : undefined),
+    })) };
+  }
+  function elapsedSeconds(row) {
+    const start = Date.parse(row.createdAt || '');
+    const end = Date.parse(row.endedAt || '');
+    if (!start || !end) return undefined;
+    return Math.max(0, Math.round((end - start) / 1000));
+  }
+  function refreshTranscript() {
+    for (const entry of transcriptRows.values()) {
+      const snapshot = transcriptAgents(entry);
+      if (!snapshot?.agents?.length) continue;      // keep the last known state
+      const print = fingerprint(snapshot.agents);
+      if (print === entry.print) continue;
+      entry.print = print; entry.snapshot = snapshot;
+      for (const invalidate of entry.invalidators) invalidate();
+    }
+  }
+  function rememberTool(id, entry) {
+    if (!id) return;
+    transcriptRows.set(id, { ...entry, invalidators: new Set(), print: undefined, snapshot: undefined });
+    refreshTranscript();
+  }
+  function trackRenderer(context) {
+    const entry = transcriptRows.get(context?.toolCallId);
+    if (!entry) return undefined;
+    if (typeof context.invalidate === 'function') entry.invalidators.add(context.invalidate);
+    return entry;
   }
   function configureControls(hasTasks) {
     if (!pi.getActiveTools) return;
@@ -235,7 +287,9 @@ export default function adapter(pi, dependencies = {}) {
           const row = taskRow(run, exit, latestResult, activity, config.language);
           const settled = ['completed', 'failed', 'interrupted', 'cancelled'].includes(row.taskState);
           rows.push({ ...row, task: fit(run.task || '', 240), summary: undefined, cleanupError: cleanupErrors.get(id),
-            label: resolveLabel(run), role: run.role, chain: run.chain, tokens: usage.tokens,
+            label: resolveLabel(run), role: run.role, chain: run.chain, model: run.model,
+            tokens: usage.tokens, turns: usage.turns, toolUses: usage.toolUses,
+            result: latestResult?.text ? String(latestResult.text).slice(0, 4000) : undefined,
             endedAt: settled ? latestResult?.createdAt || exit?.at : undefined });
         }
       }
@@ -248,7 +302,7 @@ export default function adapter(pi, dependencies = {}) {
       if (epoch !== generation) return;
       chainMap = chains;
       if (epoch === generation) {
-        overviewRows = rows; updateUI(); monitor(); monitorProcesses(processRuns); scheduleWake(); cleanBlocks();
+        overviewRows = rows; updateUI(); refreshTranscript(); monitor(); monitorProcesses(processRuns); scheduleWake(); cleanBlocks();
       }
     } catch (e) {
       if (epoch === generation && ctx.hasUI && statusText !== `Rex: ${e.message}`) {
@@ -426,7 +480,7 @@ export default function adapter(pi, dependencies = {}) {
     clearInterval(timer); clearTimeout(debounce); clearTimeout(wakeTimer); wakeTimer = undefined; watcher?.close();
     watcher = undefined; timer = undefined; scanning = undefined; cleanupWorker = undefined;
     current = undefined; pending.clear(); inbox.clear(); tracked.clear(); cleanup.clear(); cleanupErrors.clear();
-    chainSeen.clear(); chainWork.clear(); chainMap = new Map();
+    chainSeen.clear(); chainWork.clear(); chainMap = new Map(); transcriptRows.clear();
   }
   pi.on('session_shutdown', stop);
   pi.on('session_start', async (_event, ctx) => {
@@ -751,11 +805,70 @@ export default function adapter(pi, dependencies = {}) {
       } catch (error) { if (epoch === generation) await dialogs.view(ctx, ui('actionError'), error.message); }
     } });
   }
-  function tool(name, description, parameters, handler) {
+  const paintWith = theme => (token, text) => {
+    if (!theme) return text;
+    if (token === 'bold') return theme.bold ? theme.bold(text) : text;
+    return theme.fg ? theme.fg(token, text) : text;
+  };
+  const expandHint = (context, expanded) => (typeof context?.keyHint === 'function'
+    ? context.keyHint('app.tools.expand', expanded ? 'to collapse' : 'to expand') : undefined);
+  // A launched call the extension has lost track of (after /reload) still has to
+  // say something true: the label comes from the arguments, the state from nothing.
+  const argsAgent = (args, kind) => agentSnapshot({ label: args?.label || args?.title, role: kind === 'agent' ? args?.agent : undefined, state: 'launching' });
+  // Before the first scan lands there is no run to read, but the arguments
+  // already say what was asked for: queued steps, an empty progress count.
+  const argsPipeline = args => {
+    const steps = Array.isArray(args?.steps) ? args.steps : [];
+    return { title: args?.title, done: 0, total: steps.length,
+      agents: steps.map(step => agentSnapshot({ label: step?.label, role: step?.agent, state: 'queued' })) };
+  };
+
+  function agentRenderers() {
+    return {
+      renderCall(args, theme, context) {
+        const entry = trackRenderer(context);
+        return component(() => agentHeader((entry?.snapshot?.agents || [argsAgent(args, 'agent')])[0],
+          { hint: expandHint(context, context?.expanded) }), paintWith(theme));
+      },
+      renderResult(result, options, theme, context) {
+        const entry = trackRenderer(context);
+        return component(width => {
+          const agent = entry?.snapshot?.agents?.[0] || argsAgent(context?.args);
+          const failure = result?.details?.error;
+          if (failure) return [[['⎿ ', 'dim'], [String(failure), 'error']]];
+          return agentBody(agent, { width, expanded: Boolean(options?.expanded) });
+        }, paintWith(theme));
+      },
+    };
+  }
+  function pipelineRenderers() {
+    return {
+      renderCall(args, theme, context) {
+        const entry = trackRenderer(context);
+        return component(() => {
+          const snapshot = entry?.snapshot;
+          const hint = expandHint(context, context?.expanded);
+          const from = snapshot || argsPipeline(args);
+          return pipelineHeader({ title: from.title, done: from.done, total: from.total }, { hint });
+        }, paintWith(theme));
+      },
+      renderResult(result, options, theme, context) {
+        const entry = trackRenderer(context);
+        return component(width => {
+          const failure = result?.details?.error;
+          if (failure) return [[['⎿ ', 'dim'], [String(failure), 'error']]];
+          return pipelineBody(entry?.snapshot || argsPipeline(context?.args), { width, expanded: Boolean(options?.expanded) });
+        }, paintWith(theme));
+      },
+    };
+  }
+
+  function tool(name, description, parameters, handler, render) {
     const direct = Boolean(process.env.REX_SESSION && process.env.REX_BLOCK) && ['subagent', 'btw', 'bg_run', 'rex_finish'].includes(name);
     const definition = { name, label: name, description, parameters, exposure: direct ? 'direct' : 'deferred',
-      async execute(_id, params, signal, _update, ctx) {
-        try { signal?.throwIfAborted(); return textResult(await handler(params, ctx, signal)); }
+      ...(render || {}),
+      async execute(id, params, signal, _update, ctx) {
+        try { signal?.throwIfAborted(); return textResult(await handler(params, ctx, signal, id)); }
         catch (e) { return { ...textResult({ error: e.message }), isError: true }; }
       },
     };
@@ -767,8 +880,10 @@ export default function adapter(pi, dependencies = {}) {
   const fields = { task: string, name: string, label: string, cwd: string, model: string, fork: { type: 'boolean' } };
   const agentFields = { ...fields, agent: string };
   const roleHint = roleSummary(discoverRoles(process.cwd()));
-  tool('subagent', `Launch a bounded task in a persistent interactive Pi terminal in a Rex tab. Optional agent picks a role, which supplies its own model, thinking, tools and instructions${roleHint ? `: ${roleHint}` : ''}. The label is required: six words or fewer naming the goal, because the parent list shows goals, not task text. Result arrives automatically; do not poll. Review the handoff, then promptly call rex_finish unless another agent turn is needed; retained files remain usable for integration and testing. Use separate checkouts for parallel writers.`, schema(agentFields, ['task', 'label']), (p, ctx, signal) => launch('agent', p, ctx, signal));
-  tool('pipeline', `Run an ordered chain of agent roles, one pane per step. Each step receives the overall task and the previous step's report; steps run sequentially and one combined report arrives when the chain ends (max ${MAX_STEPS} steps). Every step needs a label of six words or fewer naming that step's goal. Roles: ${roleHint || 'none'}. Do not poll.`, schema({ steps: { type: 'array', minItems: 1, maxItems: MAX_STEPS, items: { type: 'object', properties: { agent: string, task: string, label: string, model: string }, required: ['task', 'label'], additionalProperties: false } }, title: string, cwd: string, model: string, fork: { type: 'boolean' } }, ['steps']), (p, ctx, signal) => startPipeline(p, ctx, signal));
+  tool('subagent', `Launch a bounded task in a persistent interactive Pi terminal in a Rex tab. Optional agent picks a role, which supplies its own model, thinking, tools and instructions${roleHint ? `: ${roleHint}` : ''}. The label is required: six words or fewer naming the goal, because the parent list shows goals, not task text. Result arrives automatically; do not poll. Review the handoff, then promptly call rex_finish unless another agent turn is needed; retained files remain usable for integration and testing. Use separate checkouts for parallel writers.`, schema(agentFields, ['task', 'label']), (p, ctx, signal, id) => launch('agent', p, ctx, signal)
+    .then(run => { rememberTool(id, { kind: 'agent', runId: run.id }); return run; }), agentRenderers());
+  tool('pipeline', `Run an ordered chain of agent roles, one pane per step. Each step receives the overall task and the previous step's report; steps run sequentially and one combined report arrives when the chain ends (max ${MAX_STEPS} steps). Every step needs a label of six words or fewer naming that step's goal. Roles: ${roleHint || 'none'}. Do not poll.`, schema({ steps: { type: 'array', minItems: 1, maxItems: MAX_STEPS, items: { type: 'object', properties: { agent: string, task: string, label: string, model: string }, required: ['task', 'label'], additionalProperties: false } }, title: string, cwd: string, model: string, fork: { type: 'boolean' } }, ['steps']), (p, ctx, signal, id) => startPipeline(p, ctx, signal)
+    .then(chain => { rememberTool(id, { kind: 'pipeline', chainId: chain.id }); return chain; }), pipelineRenderers());
   tool('btw', 'Reuse the parent side conversation, or create it on the right. Supply task to queue a question; omit task to focus. Only /btw-return sends conclusions back.', schema(fields), (p, ctx, signal) => launch('btw', p, ctx, signal));
   tool('bg_run', 'Run a long shell command in a background Rex block. Use for builds/tests/servers that should not block the main task. Completion reports exit code and output automatically; do not poll.', schema({ command: string, name: string, cwd: string }, ['command']), (p, ctx, signal) => launch('shell', { ...p, task: p.command }, ctx, signal));
   tool('rex_finish', 'Promptly close a completed agent/shell block after reviewing its handoff unless further interaction is needed. Files, results and session records remain available for parent integration/testing; do not wait for the overall parent task to end. Requires a completed task and an idle or exited process; rejects BTW and active/failed tasks.', schema({ id: string }, ['id']), (p, _ctx, signal) => control(p.id, 'finish', signal));

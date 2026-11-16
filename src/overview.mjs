@@ -69,10 +69,13 @@ const TERMINAL = ['failed', 'interrupted', 'cancelled', 'exited', 'error'];
 
 function glyph(state, now) {
   if (['running', 'launching', 'uncertain'].includes(state)) return [SPIN[Math.floor(now / FRAME_MS) % SPIN.length], 'accent'];
-  if (state === 'pending') return ['○', 'dim'];
+  if (state === 'pending' || state === 'queued') return ['○', 'dim'];
   if (TERMINAL.includes(state)) return ['●', 'error'];
   return ['●', 'success'];
 }
+
+// Shared with the transcript renderer so both places animate identically.
+export { glyph as stateGlyph };
 function elapsed(row, now = Date.now()) {
   const start = Date.parse(row?.createdAt || '');
   if (!start) return 0;
