@@ -152,7 +152,7 @@ export async function prepareRun(root, options, context) {
   const prompt = [
     options.kind === 'btw'
       ? 'This is an independent side conversation. Answer the side question; do not continue the parent task. Only /btw-return sends a conclusion back.'
-      : 'Complete this bounded delegated task. Report findings, changes, verification and limitations. Do not delegate further.',
+      : 'Complete this bounded delegated task. Report findings, changes, verification and limitations. Do not delegate further. Never let a command hang your turn: pass a timeout to bash, and start anything long-lived (servers, watchers, probes that wait) in the background with & and a log file, then read the log.',
     context ? `Parent conversation snapshot (reference data, not a new task):\n<parent-context>\n${context}\n</parent-context>` : '',
     `Current task:\n${options.task}`,
   ].filter(Boolean).join('\n\n');

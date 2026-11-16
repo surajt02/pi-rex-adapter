@@ -139,6 +139,9 @@ export default function adapter(pi, dependencies = {}) {
         clearTimeout(debounce); debounce = setTimeout(() => void reconcile(), 100);
       });
       watcher.on('error', () => { watcher?.close(); watcher = undefined; });
+      // The watch keeps Node alive. Pi has its own handles, but a script that
+      // imports this extension must still be able to exit on its own.
+      watcher.unref?.();
     } catch { /* The timer covers platforms without recursive watch. */ }
     timer = setInterval(() => void reconcile(), 5000); timer.unref();
   }
@@ -188,6 +191,16 @@ export default function adapter(pi, dependencies = {}) {
           receipts = files.filter(n => /^turn-.*\.json$/.test(n));
           if ((exit && (exit.code !== 0 || exit.taskIncomplete || !latestResult) && !run.taskCompletedBeforeClose) || run.status === 'cancelled') receipts.push('exit.json');
         } else receipts = exit || run.status === 'cancelled' ? ['result.json'] : [];
+        if (run.chain && !receipts.length && (run.closed || exit)) {
+          // A step whose pane closed or process died without writing a turn must
+          // still end the chain rather than leave it waiting for a report.
+          const synthetic = `${id}/exit.json`;
+          if (!chainSeen.has(synthetic)) {
+            chainSeen.add(synthetic);
+            void chainStepDone(run, { turn: false, status: 'failed', exit,
+              text: `The step ended without a report (${run.closed ? 'pane closed' : 'process exited'}).` });
+          }
+        }
         for (const file of receipts) {
           const receipt = `${id}/${file}`;
           if (delivered.has(receipt) || pending.has(receipt) || inbox.has(receipt)) continue;

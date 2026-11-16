@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import adapter from '../src/index.mjs';
@@ -189,4 +189,21 @@ test('a pipeline rejects too many steps and unknown roles before launching anyth
   assert.match(await error({ steps: [] }), /at least one step/);
   assert.match(await error({ steps: [{ agent: 'scout' }] }), /Step 1 needs a task/);
   assert.equal(client.calls.open.length, 0, 'validation happens before any pane exists');
+});
+
+test('a step whose pane closes without a report fails the chain instead of stalling it', async t => {
+  const client = fakeRex();
+  const h = await fixture(t, client);
+  const started = await h.call('pipeline', { steps: [
+    { agent: 'scout', task: 'Map it' },
+    { agent: 'worker', task: 'Change it' },
+  ] });
+  const dir = join(h.root, started.details.first);
+  const run = JSON.parse(await readFile(join(dir, 'run.json'), 'utf8'));
+  await atomicJson(join(dir, 'run.json'), { ...run, closed: true });
+  let message;
+  await until(() => { const value = h.boundary(); if (value) message = value.entries.at(-1); return Boolean(value); }, 'the stalled chain to report');
+  assert.match(message.content, /: failed/);
+  assert.match(message.content, /Failing step report \(scout\):\nThe step ended without a report \(pane closed\)/);
+  assert.equal(client.calls.open.length, 1, 'the chain stops instead of starting the next step');
 });
