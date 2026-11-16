@@ -92,6 +92,11 @@ test('every rendered line fits the width it was given, colour or not', () => {
   }
 });
 
+test('a header without a known step count claims no progress', () => {
+  const [line] = flat(pipelineHeader({ title: 'dot cycle check' }));
+  assert.equal(line, '● Pipeline · dot cycle check');
+});
+
 test('an unknown call after /reload still renders a truthful row', () => {
   const view = component(() => agentHeader(agentSnapshot({ label: 'Review plan vs code', role: 'reviewer', state: 'launching' }), { now: 0 }));
   assert.match(view.render(80)[0], /Review plan vs code \(reviewer\)/);

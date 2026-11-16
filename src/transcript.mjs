@@ -72,7 +72,7 @@ export function agentHeader(agent, { now = Date.now(), hint } = {}) {
 export function pipelineHeader({ title, done, total }, { hint } = {}) {
   const line = [['●', 'accent'], [' ', null], ['Pipeline', 'bold']];
   if (title) line.push([' · ', 'dim'], [plain(title), 'dim']);
-  line.push([' · ', 'dim'], [`${done}/${total} done`, 'dim']);
+  if (Number.isFinite(total)) line.push([' · ', 'dim'], [`${done}/${total} done`, 'dim']);
   if (hint) line.push([' ', null], [`(${hint})`, 'dim']);
   return [line];
 }

@@ -816,6 +816,7 @@ export default function adapter(pi, dependencies = {}) {
     ? context.keyHint('app.tools.expand', expanded ? 'to collapse' : 'to expand') : undefined);
   // A launched call the extension has lost track of (after /reload) still has to
   // say something true: the label comes from the arguments, the state from nothing.
+  const launchedNote = result => (result?.details?.id ? `Launched · ${result.details.id}` : 'Launched');
   const argsAgent = (args, kind) => agentSnapshot({ label: args?.label || args?.title, role: kind === 'agent' ? args?.agent : undefined, state: 'launching' });
   // Before the first scan lands there is no run to read, but the arguments
   // already say what was asked for: queued steps, an empty progress count.
@@ -835,9 +836,10 @@ export default function adapter(pi, dependencies = {}) {
       renderResult(result, options, theme, context) {
         const entry = trackRenderer(context, 'result');
         return component(width => {
-          const agent = entry?.snapshot?.agents?.[0] || argsAgent(context?.args);
           const failure = result?.details?.error;
           if (failure) return [[['⎿ ', 'dim'], [String(failure), 'error']]];
+          if (!entry) return [[['⎿ ', 'dim'], [launchedNote(result), 'dim']]];
+          const agent = entry.snapshot?.agents?.[0] || argsAgent(context?.args);
           return agentBody(agent, { width, expanded: Boolean(options?.expanded) });
         }, paintWith(theme));
       },
@@ -850,6 +852,8 @@ export default function adapter(pi, dependencies = {}) {
         return component(() => {
           const snapshot = entry?.snapshot;
           const hint = expandHint(context, context?.expanded);
+          // Progress is only knowable while this session owns the launch.
+          if (!entry) return pipelineHeader({ title: args?.title || args?.steps?.[0]?.label }, { hint });
           const from = snapshot || argsPipeline(args);
           return pipelineHeader({ title: from.title, done: from.done, total: from.total }, { hint });
         }, paintWith(theme));
@@ -859,7 +863,8 @@ export default function adapter(pi, dependencies = {}) {
         return component(width => {
           const failure = result?.details?.error;
           if (failure) return [[['⎿ ', 'dim'], [String(failure), 'error']]];
-          return pipelineBody(entry?.snapshot || argsPipeline(context?.args), { width, expanded: Boolean(options?.expanded) });
+          if (!entry) return [[['⎿ ', 'dim'], [launchedNote(result), 'dim']]];
+          return pipelineBody(entry.snapshot || argsPipeline(context?.args), { width, expanded: Boolean(options?.expanded) });
         }, paintWith(theme));
       },
     };
