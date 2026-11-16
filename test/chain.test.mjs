@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import adapter from '../src/index.mjs';
@@ -54,7 +54,7 @@ async function fixture(t, client) {
     if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
     await rm(dir, { recursive: true, force: true });
   });
-  const call = (name, params) => tools[name].execute('call', params, undefined, undefined, ctx);
+  const call = (name, params, signal) => tools[name].execute('call', params, signal, undefined, ctx);
   const boundary = () => events.turn_end({ entries: [], context: { canContinue: true }, outcome: 'completed' }, ctx);
   await events.session_start({}, ctx);
   return { dir, root, tools, entries, messages, ctx, call, boundary };
@@ -206,4 +206,25 @@ test('a step whose pane closes without a report fails the chain instead of stall
   assert.match(message.content, /: failed/);
   assert.match(message.content, /Failing step report \(scout\):\nThe step ended without a report \(pane closed\)/);
   assert.equal(client.calls.open.length, 1, 'the chain stops instead of starting the next step');
+});
+
+test('a failed first launch leaves a terminal chain, not a running one', async t => {
+  const client = fakeRex();
+  // Launch throws for reasons of its own (no Rex environment, placement failure,
+  // duplicate name); a failed create is caught inside launch and returns 'uncertain'.
+  const saved = [process.env.REX_SESSION, process.env.REX_BLOCK];
+  delete process.env.REX_SESSION; delete process.env.REX_BLOCK;
+  t.after(() => { if (saved[0] !== undefined) process.env.REX_SESSION = saved[0]; if (saved[1] !== undefined) process.env.REX_BLOCK = saved[1]; });
+  const h = await fixture(t, client);
+  const failed = await h.call('pipeline', { steps: [
+    { agent: 'scout', task: 'Map it' }, { agent: 'worker', task: 'Change it' }] });
+  assert.match(failed.content[0].text, /Start Pi inside Rex/);
+  assert.equal(failed.isError, true);
+  const chains = await readdir(join(h.root)).catch(() => []);
+  const chainDir = chains.find(name => /^[0-9a-f-]{36}$/.test(name));
+  const chain = JSON.parse(await readFile(join(h.root, chainDir, 'chain.json'), 'utf8'));
+  assert.equal(chain.status, 'failed');
+  assert.equal(chain.steps[0].status, 'failed');
+  assert.match(chain.steps[0].error, /Start Pi inside Rex/);
+  assert.equal(h.boundary(), undefined, 'the tool call already reported the failure');
 });

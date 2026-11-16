@@ -197,7 +197,7 @@ export default function adapter(pi, dependencies = {}) {
           const synthetic = `${id}/exit.json`;
           if (!chainSeen.has(synthetic)) {
             chainSeen.add(synthetic);
-            void chainStepDone(run, { turn: false, status: 'failed', exit,
+            startChainStep(run, { turn: false, status: 'failed', exit,
               text: `The step ended without a report (${run.closed ? 'pane closed' : 'process exited'}).` });
           }
         }
@@ -219,7 +219,7 @@ export default function adapter(pi, dependencies = {}) {
           if (run.chain) {
             if (chainSeen.has(receipt)) continue;
             chainSeen.add(receipt);
-            void chainStepDone(run, { status, text, turn, exit });
+            startChainStep(run, { status, text, turn, exit });
             continue;
           }
           inbox.set(receipt, { receipt, id, order, status, exitCode: turn ? undefined : exit?.code,
@@ -257,6 +257,13 @@ export default function adapter(pi, dependencies = {}) {
     const next = previous.then(() => work(), () => work());
     chainWork.set(id, next.then(() => {}, () => {}));
     return next;
+  }
+  // A handler that throws (corrupt chain.json, disk error) must surface as a status
+  // line, not as an unhandled rejection that takes the whole session down.
+  function startChainStep(run, info) {
+    void chainStepDone(run, info).catch(error => {
+      if (current?.hasUI) current.ui.setStatus('rex', `Rex: chain ${error.message}`);
+    });
   }
   function chainStepDone(run, info) {
     const id = run.chain?.id;
@@ -346,7 +353,18 @@ export default function adapter(pi, dependencies = {}) {
     const title = String(params.title || steps[0].task).trim().split('\n')[0].slice(0, 48);
     const chain = await createChain(chainRoot, { title, task: steps[0].task, steps,
       cwd: resolve(ctx.cwd, params.cwd || '.'), model: params.model, fork: params.fork });
-    const first = await launchStep(chain, chain.steps[0], chainRoot, ctx, signal);
+    let first;
+    try {
+      first = await launchStep(chain, chain.steps[0], chainRoot, ctx, signal);
+    } catch (error) {
+      // The tool call reports the failure; chain.json must record a terminal state
+      // too, or the chain looks like it is still running forever.
+      chain.status = 'failed';
+      chain.steps[0].status = 'failed';
+      chain.steps[0].error = error.message;
+      await writeChain(chainRoot, chain).catch(() => {});
+      throw error;
+    }
     return { id: chain.id, status: chain.status, title,
       steps: chain.steps.map(step => ({ label: stepLabel(step, chain.steps.length), agent: step.agent, state: step.status })),
       first: first.id, artifacts: chainDirectory(chainRoot, chain.id),
