@@ -74,9 +74,11 @@ test('unused session has no task directory, watcher, timer-driven UI or direct t
 });
 
 test('Rex exposes only launch and finish tools directly; low-frequency controls remain discoverable', async t => {
+  // pipeline is a launch tool: deferred exposure would hide it behind codemode, and
+  // a codemode block cannot show the agent rows in the transcript.
   inRex(t); const h = await fixture(t);
   assert.deepEqual(Object.values(h.tools).filter(tool => tool.exposure === 'direct').map(tool => tool.name).sort(),
-    ['bg_run', 'btw', 'rex_finish', 'subagent']);
+    ['bg_run', 'btw', 'pipeline', 'rex_finish', 'subagent']);
 });
 
 test('without tool discovery, controls become direct only while owned tasks need attention', async t => {

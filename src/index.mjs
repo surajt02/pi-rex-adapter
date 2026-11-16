@@ -176,7 +176,7 @@ export default function adapter(pi, dependencies = {}) {
     if (direct === controlsDirect) return;
     controlsDirect = direct;
     for (const [name, definition] of toolDefinitions) {
-      if (['subagent', 'btw', 'bg_run'].includes(name) || name === 'rex_finish' && process.env.REX_SESSION && process.env.REX_BLOCK) continue;
+      if (['subagent', 'pipeline', 'btw', 'bg_run'].includes(name) || name === 'rex_finish' && process.env.REX_SESSION && process.env.REX_BLOCK) continue;
       pi.registerTool({ ...definition, exposure: direct ? 'direct' : 'deferred' });
     }
   }
@@ -871,7 +871,7 @@ export default function adapter(pi, dependencies = {}) {
   }
 
   function tool(name, description, parameters, handler, render) {
-    const direct = Boolean(process.env.REX_SESSION && process.env.REX_BLOCK) && ['subagent', 'btw', 'bg_run', 'rex_finish'].includes(name);
+    const direct = Boolean(process.env.REX_SESSION && process.env.REX_BLOCK) && ['subagent', 'pipeline', 'btw', 'bg_run', 'rex_finish'].includes(name);
     const definition = { name, label: name, description, parameters, exposure: direct ? 'direct' : 'deferred',
       ...(render || {}),
       async execute(id, params, signal, _update, ctx) {
