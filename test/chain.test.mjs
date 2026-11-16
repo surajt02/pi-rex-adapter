@@ -137,9 +137,7 @@ test('pipeline steps keep their labels in chain.json', async t => {
     { agent: 'scout', task: 'Map the auth module', label: 'Map auth module' },
     { agent: 'worker', task: 'Add the missing test', label: 'Add missing test' },
   ] });
-  const chains = await readdir(join(h.root));
-  const chainDir = chains.find(name => /^[0-9a-f-]{36}$/.test(name));
-  const chain = JSON.parse(await readFile(join(h.root, chainDir, 'chain.json'), 'utf8'));
+  const chain = JSON.parse(await readFile(join(started.details.artifacts, 'chain.json'), 'utf8'));
   assert.deepEqual(chain.steps.map(step => step.label), ['Map auth module', 'Add missing test']);
   const run = JSON.parse(await readFile(join(h.root, started.details.first, 'run.json'), 'utf8'));
   assert.equal(run.label, 'Map auth module');
@@ -256,8 +254,11 @@ test('a failed first launch leaves a terminal chain, not a running one', async t
   assert.match(failed.content[0].text, /Start Pi inside Rex/);
   assert.equal(failed.isError, true);
   const chains = await readdir(join(h.root)).catch(() => []);
-  const chainDir = chains.find(name => /^[0-9a-f-]{36}$/.test(name));
-  const chain = JSON.parse(await readFile(join(h.root, chainDir, 'chain.json'), 'utf8'));
+  const chainFile = (await Promise.all(chains.map(async name => {
+    const path = join(h.root, name, 'chain.json');
+    return readFile(path, 'utf8').then(text => ({ path, text }), () => undefined);
+  }))).find(Boolean);
+  const chain = JSON.parse(chainFile.text);
   assert.equal(chain.status, 'failed');
   assert.equal(chain.steps[0].status, 'failed');
   assert.match(chain.steps[0].error, /Start Pi inside Rex/);
