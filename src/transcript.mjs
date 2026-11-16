@@ -22,6 +22,9 @@ const STATE_WORD = {
 const ACTIVE = new Set(['running', 'launching', 'uncertain', 'queued', 'pending']);
 
 export const isActive = state => ACTIVE.has(state);
+// Only these animate: a queued step's ○ and a settled ● are static, so a row in
+// those states has no reason to repaint between data changes.
+export const spinning = state => ['running', 'launching', 'uncertain'].includes(state);
 export const stateWord = state => STATE_WORD[state] || 'Waiting';
 export const severity = state => (state === 'completed' ? 'success'
   : ['failed', 'interrupted', 'cancelled', 'exited', 'error'].includes(state) ? 'error' : 'dim');

@@ -15,8 +15,8 @@ import { directRun, observeLifecycles } from './lifecycle.mjs';
 import { createDialogs } from './dialog.mjs';
 import { DEFAULT_CONFIG, loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
-import { taskRow, showOverview, activeOverviewRows, visibleRows, orderRows, rowLabel, plain, fit, buildGroups } from './overview.mjs';
-import { agentSnapshot, agentBody, agentHeader, pipelineBody, pipelineHeader, fingerprint, component } from './transcript.mjs';
+import { taskRow, showOverview, activeOverviewRows, visibleRows, orderRows, rowLabel, plain, fit, buildGroups, FRAME_MS } from './overview.mjs';
+import { agentSnapshot, agentBody, agentHeader, pipelineBody, pipelineHeader, fingerprint, component, spinning } from './transcript.mjs';
 
 const runner = fileURLToPath(new URL('./runner.mjs', import.meta.url));
 const textResult = value => ({ content: [{ type: 'text', text: JSON.stringify(value) }], details: value });
@@ -33,7 +33,7 @@ export default function adapter(pi, dependencies = {}) {
   let config = { ...DEFAULT_CONFIG };
   const ui = (key, values) => t(config.language, key, values);
   const dialogs = createDialogs(() => config.language);
-  let actionTimer, taskPanel;
+  let actionTimer, taskPanel, spinTimer;
   let overviewEnabled = true, overviewRows = [], chainMap = new Map();
   const inbox = new Map();
   // One entry per rendered tool call, keyed by Pi's toolCallId: the agents to
@@ -153,10 +153,27 @@ export default function adapter(pi, dependencies = {}) {
       const print = fingerprint(snapshot.agents);
       if (print === entry.print) continue;
       entry.print = print; entry.snapshot = snapshot;
+      entry.spinning = snapshot.agents.some(agent => spinning(agent.state));
       // One invalidator per slot: Pi hands a fresh closure to every render, so a
       // set of them would grow with every repaint.
       for (const invalidate of entry.invalidators.values()) invalidate();
     }
+    spin();
+  }
+  // A spinner is the one thing that has to move without any new data, and Pi
+  // only re-runs a settled row's renderers when the row itself is invalidated.
+  // One timer for every row, stopped as soon as nothing is running.
+  function spin() {
+    const wanted = [...transcriptRows.values()].some(entry => entry.spinning);
+    if (!wanted) { clearInterval(spinTimer); spinTimer = undefined; return; }
+    if (spinTimer) return;
+    spinTimer = setInterval(() => {
+      for (const entry of transcriptRows.values()) {
+        if (!entry.spinning) continue;
+        for (const invalidate of entry.invalidators.values()) invalidate();
+      }
+    }, FRAME_MS);
+    spinTimer.unref?.();
   }
   function rememberTool(id, entry) {
     if (!id) return;
@@ -482,7 +499,7 @@ export default function adapter(pi, dependencies = {}) {
     clearInterval(timer); clearTimeout(debounce); clearTimeout(wakeTimer); wakeTimer = undefined; watcher?.close();
     watcher = undefined; timer = undefined; scanning = undefined; cleanupWorker = undefined;
     current = undefined; pending.clear(); inbox.clear(); tracked.clear(); cleanup.clear(); cleanupErrors.clear();
-    chainSeen.clear(); chainWork.clear(); chainMap = new Map(); transcriptRows.clear();
+    chainSeen.clear(); chainWork.clear(); chainMap = new Map(); transcriptRows.clear(); clearInterval(spinTimer); spinTimer = undefined;
   }
   pi.on('session_shutdown', stop);
   pi.on('session_start', async (_event, ctx) => {

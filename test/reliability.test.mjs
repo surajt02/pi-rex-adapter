@@ -9,6 +9,7 @@ import adapter from '../src/index.mjs';
 import { registerChild } from '../src/child.mjs';
 import { prepareRun, atomicJson, readJson, exec, listRuns } from '../src/core.mjs';
 import { withLayoutLock } from '../src/layout.mjs';
+import { FRAME_MS } from '../src/overview.mjs';
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(predicate) {
@@ -441,4 +442,37 @@ test('a launch is a row in the transcript: it names the goal, then reports what 
 
   const expanded = h.tools.subagent.renderResult({ content: [], details: started.details }, { expanded: true }, theme, context);
   assert.match(expanded.render(100).join('\n'), /Two tests only cover the happy path/, 'ctrl+o shows the report');
+});
+
+test('a running row animates on its own, and stops when the run settles', async t => {
+  inRex(t);
+  const rex = {
+    async open() { return 'block-1'; }, async inspect() { return { window: 'window-1' }; },
+    async control() {}, events() { return () => {}; },
+  };
+  const h = await fixture(t, rex);
+  await h.events.session_start({}, h.ctx);
+  const params = { task: 'Review the diff carefully', label: 'Review the diff' };
+  const started = await h.call('subagent', params);
+
+  let repaints = 0;
+  const context = { toolCallId: 'call', expanded: false, invalidate() { repaints++; }, keyHint: () => 'ctrl+o to expand' };
+  h.tools.subagent.renderCall(params, {}, context);
+  const body = h.tools.subagent.renderResult({ content: [], details: started.details }, { expanded: false }, {}, context);
+
+  // Nothing writes to disk here: the only thing that could repaint the row is
+  // the spinner timer, which is why a frozen glyph would show up as zero.
+  const atStart = repaints;
+  await delay(FRAME_MS * 3);
+  assert.ok(repaints - atStart >= 2, `expected the spinner to drive repaints, got ${repaints - atStart}`);
+  assert.match(body.render(100)[0], /Running/);
+
+  const dir = join(h.root, started.details.id);
+  await atomicJson(join(dir, 'result.json'), { text: 'ok', status: 'completed', createdAt: new Date().toISOString() });
+  await atomicJson(join(dir, 'activity.json'), { task: 'completed', process: 'idle' });
+  await until(() => body.render(100).join('').includes('Done'));
+  await delay(FRAME_MS);
+  const settled = repaints;
+  await delay(FRAME_MS * 4);
+  assert.equal(repaints, settled, 'a settled row must stop repainting');
 });

@@ -160,9 +160,9 @@ A single agent has no header of its own, because its glyph already carries the s
   ⎿ Running · mimo-v2.6-pro · 8 turns · 11 tool uses · 41.2k token
 ```
 
-The glyph is the same dot cycle as the rest of the UI: spinning while the agent runs, filled green when it finished, red when it failed or was interrupted, hollow for a step that has not started. The `⎿` line carries the state word, the model, how many turns and tool calls the child has taken, its current token count, and — once it finishes — how long it ran. Those numbers are read from the child's own session file, and the row repaints itself when they change, so a long chain updates in place instead of freezing at "Running". A step that has not launched says `Waiting for the previous step` rather than showing zeros.
+The glyph is the same dot cycle as the rest of the UI, and it really does spin: a running row repaints on its own every 170 ms, so a child that is thinking silently still looks alive. It settles into a filled green dot when the agent finished, red when it failed or was interrupted, and stays hollow for a step that has not started. The `⎿` line carries the state word, the model, how many turns and tool calls the child has taken, its current token count, and — once it finishes — how long it ran. Those numbers are read from the child's own session file, and the row repaints itself when they change, so a long chain updates in place instead of freezing at "Running". A step that has not launched says `Waiting for the previous step` rather than showing zeros.
 
-Below 90 columns the model name is dropped to keep the numbers. `ctrl+o` expands each agent to the first six lines of its report, with a count of anything it left out; the full text is always in the result message and in `rex_tasks`.
+Below 90 columns the model name is dropped to keep the numbers. `ctrl+o` expands each agent to the first six non-blank lines of its report — blank lines between paragraphs are dropped rather than spent from the six — and says how many more lines there are. The full text is always in the result message and in `rex_tasks`.
 
 ## Task overview and controls
 
