@@ -20,7 +20,7 @@ export const COMPACT_WIDTH = 90;
 const STATE_WORD = {
   completed: 'Done', running: 'Running', launching: 'Starting', uncertain: 'Unverified',
   failed: 'Failed', interrupted: 'Interrupted', cancelled: 'Cancelled', exited: 'Exited',
-  pending: 'Waiting', queued: 'Waiting',
+  pending: 'Waiting', queued: 'Waiting', skipped: 'Skipped',
 };
 const ACTIVE = new Set(['running', 'launching', 'uncertain', 'queued', 'pending']);
 
@@ -40,7 +40,9 @@ function facts(agent, width) {
   if (agent.model && width >= COMPACT_WIDTH) pieces.push([plain(agent.model).split('/').pop(), 'dim']);
   if (agent.turns) pieces.push([plural(agent.turns, 'turn'), 'dim']);
   if (agent.toolUses) pieces.push([plural(agent.toolUses, 'tool use'), 'dim']);
-  if (Number.isFinite(agent.tokens)) pieces.push([`${formatTokens(agent.tokens)} token`, 'dim']);
+  // Zero means nothing was measured, not that nothing was spent: an interrupted
+  // step never wrote a usage record, and "0 token" reads as a counted figure.
+  if (Number.isFinite(agent.tokens) && agent.tokens > 0) pieces.push([`${formatTokens(agent.tokens)} token`, 'dim']);
   if (Number.isFinite(agent.seconds)) pieces.push([formatDuration(agent.seconds), 'dim']);
   const joined = [];
   pieces.forEach((piece, index) => { if (index) joined.push([' · ', 'dim']); joined.push(piece); });
@@ -50,9 +52,11 @@ function facts(agent, width) {
 const indent = count => [' '.repeat(count), null];
 
 function statsLine(agent, width, at) {
-  return [...(agent.state === 'queued' || agent.state === 'pending'
-    ? [indent(at), ['⎿ ', 'dim'], ['Waiting for the previous step', 'dim']]
-    : [indent(at), ['⎿ ', 'dim'], ...facts(agent, width)])];
+  if (agent.state === 'skipped') return [indent(at), ['⎿ ', 'dim'], ['Skipped · the chain stopped before this step', 'dim']];
+  if (agent.state === 'queued' || agent.state === 'pending') {
+    return [indent(at), ['⎿ ', 'dim'], ['Waiting for the previous step', 'dim']];
+  }
+  return [indent(at), ['⎿ ', 'dim'], ...facts(agent, width)];
 }
 
 // The action line is one line: it names as many actions as fit and counts the

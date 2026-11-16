@@ -171,3 +171,23 @@ test('a finished chain still knows its count after its panes closed themselves',
   assert.equal(snapshot.agents[1].role, 'reviewer');
   assert.equal(chainSnapshot({ steps: [] }, previous), undefined, 'a record with no steps says nothing');
 });
+
+test('a step the chain never reached says so instead of waiting', () => {
+  const snapshot = { title: 'failure path', done: 0, total: 2, agents: [
+    agent({ label: 'Read every source file', state: 'failed', text: 'Operation aborted' }),
+    agent({ label: 'Report the summary', state: 'skipped' }),
+  ] };
+  const lines = component(w => pipelineBody(snapshot, { width: w, expanded: false })).render(120).map(line => line.replace(/<[a-z]+>/g, ''));
+  assert.equal(lines.length, 4);
+  assert.match(lines[2], /^ {2}└ ○ Report the summary/, 'a skipped step keeps the hollow glyph');
+  assert.match(lines[3], /⎿ Skipped · the chain stopped before this step/);
+  assert.doesNotMatch(lines.join('\n'), /Waiting for the previous step/);
+});
+
+test('an interrupted step with no usage record claims no token count', () => {
+  const view = component(w => agentBody(agent({ label: 'Read every source file', state: 'failed', tokens: 0, seconds: 8 }), { width: w }));
+  const facts = view.render(120).map(line => line.replace(/<[a-z]+>/g, ''))[0];
+  assert.match(facts, /^ {2}⎿ Failed · /);
+  assert.doesNotMatch(facts, /token/, 'nothing was measured, so nothing is reported');
+  assert.match(facts, /8s/);
+});

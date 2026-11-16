@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import adapter from '../src/index.mjs';
 import { prepareRun, atomicJson, readJson } from '../src/core.mjs';
-import { overviewLines, fit, orderRows, activeOverviewRows, visibleRows, MAX_ROWS, FRAME_MS } from '../src/overview.mjs';
+import { overviewLines, buildGroups, fit, orderRows, activeOverviewRows, visibleRows, MAX_ROWS, FRAME_MS } from '../src/overview.mjs';
 import { measure } from '../src/columns.mjs';
 
 async function fixture(t, control) {
@@ -248,6 +248,17 @@ test('a pipeline renders as one ◆ block of ├/└ steps; loose rows keep a bl
   assert.match(lines[4], /^   [·✢✳✶✻✽] researcher /);
   assert.match(lines[5], /^   ● worker /);
   assert.equal(lines.length, 6);
+});
+
+test('a step a failed chain never reached reads as skipped, not as waiting', () => {
+  const { rows, chains } = scenario();
+  // Same rows, but the chain stopped at step 2: step 3 was never launched.
+  const failed = new Map([['chain-1', { ...chains.get('chain-1'), status: 'failed', steps: [
+    ...chains.get('chain-1').steps.slice(0, 2), { index: 2, agent: 'reviewer', label: 'Review plan vs code', status: 'pending' }] }]]);
+  const group = buildGroups(rows, failed).groups[0];
+  assert.deepEqual(group.steps.map(step => step.state), ['completed', 'running', 'skipped']);
+  const lines = overviewLines(rows, 126, undefined, 'en', failed);
+  assert.match(lines[3], /^   └ ○ reviewer /, 'a skipped step still occupies its row');
 });
 
 test('the running glyph is the same dot cycle the rest of the UI spins', () => {

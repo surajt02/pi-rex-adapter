@@ -65,7 +65,9 @@ export function formatTokens(tokens) {
 // a shorter block would drag the time column right on those rows only.
 export function statsText(seconds, tokens) {
   const time = formatDuration(seconds).padStart(TIME_WIDTH);
-  const tail = Number.isFinite(tokens)
+  // Nothing measured is blank, not zero: a step that was interrupted before its
+  // first usage record would otherwise report "0 token" as if it had been counted.
+  const tail = Number.isFinite(tokens) && tokens > 0
     ? `↓ ${formatTokens(tokens).padStart(TOKEN_WIDTH)} tokens`
     : ' '.repeat(2 + TOKEN_WIDTH + 7);
   return `${time} · ${tail}`;

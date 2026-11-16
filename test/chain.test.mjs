@@ -8,8 +8,11 @@ import { atomicJson } from '../src/core.mjs';
 import { composeTask, chainSummary, createChain, MAX_STEPS } from '../src/chain.mjs';
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-async function until(condition, label = 'condition') {
-  for (let i = 0; i < 400; i++) { if (await condition()) return; await delay(10); }
+// 400 polls are 4 s, shorter than the adapter's 5 s reconcile, and most waits here
+// can legitimately land on that reconcile when a watcher event is missed — so they
+// get 9 s. A real failure still surfaces, just later.
+async function until(condition, label = 'condition', attempts = 900) {
+  for (let i = 0; i < attempts; i++) { if (await condition()) return; await delay(10); }
   assert.fail(`Timed out waiting for ${label}`);
 }
 
@@ -137,7 +140,8 @@ test('a launch that is never verified fails its step instead of stalling the cha
   assert.equal(run.status, 'uncertain');
   await writeFile(join(stepDir, 'run.json'), JSON.stringify({ ...run, createdAt: new Date(Date.now() - 5 * 60_000).toISOString() }));
 
-  await until(async () => JSON.parse(await readFile(chainFile, 'utf8')).status === 'failed', 'the chain to fail');
+  // A missed watcher event leaves the 5 s reconcile as the only trigger.
+  await until(async () => JSON.parse(await readFile(chainFile, 'utf8')).status === 'failed', 'the chain to fail', 900);
   const chain = JSON.parse(await readFile(chainFile, 'utf8'));
   assert.equal(chain.steps[0].status, 'failed');
   assert.equal(chain.steps[1].runId, undefined, 'the second step is never launched');

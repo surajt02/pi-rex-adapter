@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { STATS_WIDTH, TIME_WIDTH, TOKEN_WIDTH, alignRow, cut, formatDuration, formatTokens,
-  measure, statsBlank, statsText, wrapSegments } from '../src/columns.mjs';
+  measure, paintSegments, statsBlank, statsText, wrapSegments } from '../src/columns.mjs';
 
 const red = text => `\x1b[38;5;167m${text}\x1b[0m`;
 const green = text => `\x1b[38;5;35m${text}\x1b[0m`;
@@ -80,4 +80,12 @@ test('wrapSegments hard-breaks a line with nothing to break on, and never loses 
   const lines = wrapSegments([['x'.repeat(25), 'muted']], 10);
   assert.deepEqual(lines.map(line => line.map(([text]) => text).join('')), ['x'.repeat(10), 'x'.repeat(10), 'x'.repeat(5)]);
   assert.deepEqual(wrapSegments([], 10), []);
+});
+
+test('a token count of zero is blank, because nothing was measured', () => {
+  const zero = statsText(8, 0), missing = statsText(8, undefined), counted = statsText(8, 15200);
+  assert.equal(zero, missing, 'an unmeasured count keeps the block the same width');
+  assert.equal(measure(zero), STATS_WIDTH);
+  assert.doesNotMatch(zero, /↓/);
+  assert.match(counted, /↓ 15\.2k tokens/);
 });

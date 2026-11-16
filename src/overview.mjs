@@ -69,7 +69,7 @@ const TERMINAL = ['failed', 'interrupted', 'cancelled', 'exited', 'error'];
 
 function glyph(state, now) {
   if (['running', 'launching', 'uncertain'].includes(state)) return [SPIN[Math.floor(now / FRAME_MS) % SPIN.length], 'accent'];
-  if (state === 'pending' || state === 'queued') return ['○', 'dim'];
+  if (state === 'pending' || state === 'queued' || state === 'skipped') return ['○', 'dim'];
   if (TERMINAL.includes(state)) return ['●', 'error'];
   return ['●', 'success'];
 }
@@ -99,14 +99,18 @@ export function buildGroups(rows, chains) {
   const groups = [];
   for (const [id, chainRows] of byChain) {
     const chain = chains?.get?.(id);
-    const running = !chain || chain.status === 'running';
     const total = chain?.steps?.length || chainRows[0].chain?.total || chainRows.length;
+    const stopped = Boolean(chain) && chain.status !== 'running';
     const steps = [];
     for (let index = 0; index < total; index++) {
       const row = chainRows.find(candidate => candidate.chain?.index === index);
       const record = chain?.steps?.[index];
-      if (!row && !(running && record)) continue;
-      steps.push({ index, row, agent: record?.agent, state: row?.taskState || record?.status || 'pending',
+      if (!row && !record) continue;
+      const state = row?.taskState || record?.status || 'pending';
+      // A step the chain never reached is not waiting for anything: there is no
+      // previous step left to finish, so it is skipped rather than pending.
+      steps.push({ index, row, agent: record?.agent,
+        state: stopped && (state === 'pending' || state === 'queued') ? 'skipped' : state,
         label: row?.label || record?.label || deriveLabel(row?.task || record?.task) });
     }
     const done = chain ? chain.steps.filter(step => step.status === 'completed').length
