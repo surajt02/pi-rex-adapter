@@ -394,7 +394,8 @@ export default function adapter(pi, dependencies = {}) {
       step.status = ok ? 'completed' : 'failed';
       step.text = (info.text || '').slice(0, 16000);
       step.at = new Date().toISOString();
-      if (!ok) { step.error = info.exit?.error || info.status; chain.status = 'failed'; }
+      // The step's status already says "failed"; only a distinct reason is worth storing.
+      if (!ok) { step.error = info.exit?.error || (info.status === 'failed' ? '' : info.status); chain.status = 'failed'; }
       await writeChain(chainRoot, chain);
       if (epoch !== generation) return;
       await advanceChain(chain, chainRoot, epoch);

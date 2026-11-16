@@ -336,3 +336,19 @@ test('a failed first launch leaves a terminal chain, not a running one', async t
   assert.match(chain.steps[0].error, /Start Pi inside Rex/);
   assert.equal(h.boundary(), undefined, 'the tool call already reported the failure');
 });
+
+test('a step line marks a cut sentence and does not repeat the state as a reason', () => {
+  const long = 'The step never reported: its launch was never verified, so there was nothing to observe at all, and this sentence keeps going well past the excerpt budget of one hundred and sixty characters to prove the cut.';
+  const chain = { id: 'c', title: 't', status: 'failed', steps: [
+    { index: 0, agent: 'scout', status: 'failed', runId: 'r1', text: long, error: 'failed' },
+    { index: 1, agent: 'scout', status: 'pending' },
+  ] };
+  const lines = chainSummary(chain, { artifacts: '/tmp/c' }).split('\n');
+  assert.match(lines[1], /…$/, 'a truncated excerpt says it was cut');
+  assert.doesNotMatch(lines[1], / — failed$/, 'the state word is not repeated as the reason');
+  assert.ok(lines[1].length < 260, `line stayed bounded: ${lines[1].length}`);
+
+  chain.steps[0].error = 'Operation aborted';
+  assert.match(chainSummary(chain, { artifacts: '/tmp/c' }).split('\n')[1], / — Operation aborted$/,
+    'a reason that is not the state word is still shown');
+});

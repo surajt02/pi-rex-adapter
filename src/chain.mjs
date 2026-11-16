@@ -70,8 +70,12 @@ export function chainSummary(chain, { artifacts }) {
   const final = failed || chain.steps.at(-1) || {};
   const lines = chain.steps.map(step => {
     const state = step.status + (step.runId ? ` (${step.runId})` : '');
-    const first = (step.text || '').trim().split('\n')[0]?.slice(0, 160);
-    return `Step ${step.index + 1}/${total} ${step.agent || 'agent'}: ${state}${first ? ` — ${first}` : ''}${step.error ? ` — ${step.error}` : ''}`;
+    // A cut-off sentence must not read as a complete one, and the state word is
+    // already in the line: repeating it as the reason adds nothing.
+    const raw = (step.text || '').trim().split('\n')[0] || '';
+    const first = raw.length > 160 ? `${raw.slice(0, 159)}…` : raw;
+    const reason = step.error && step.error !== step.status ? step.error : '';
+    return `Step ${step.index + 1}/${total} ${step.agent || 'agent'}: ${state}${first ? ` — ${first}` : ''}${reason ? ` — ${reason}` : ''}`;
   });
   return [
     `Rex pipeline ${chain.title} (${chain.id}): ${chain.status}; steps=${total}`,
