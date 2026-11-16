@@ -98,6 +98,53 @@ export function clampSegments(segments, limit) {
   return { segments: kept, used };
 }
 
+// Report text wraps instead of being cut. An expanded row has to show the whole
+// finding, and a table row clipped at the pane edge loses its verdict column
+// while keeping the label, which is the worse half to keep.
+export function wrapSegments(segments, width, indent = '') {
+  const limit = Math.max(1, Math.floor(Number(width) || 1));
+  const hang = indent && measure(indent) < limit - 4 ? indent : '';
+  const hangWidth = measure(hang);
+  const cells = [];
+  for (const [text, token] of segments) {
+    for (const { segment } of segmenter.segment(stripVTControlCharacters(String(text ?? '')))) {
+      cells.push({ glyph: segment, token, size: cellWidth(segment) });
+    }
+  }
+  if (!cells.length) return [];
+  const lines = [];
+  let index = 0;
+  while (index < cells.length) {
+    const room = lines.length ? limit - hangWidth : limit;
+    let end = index, used = 0;
+    while (end < cells.length && used + cells[end].size <= room) { used += cells[end].size; end += 1; }
+    if (end === index) end = index + 1;              // one glyph wider than the pane
+    if (end < cells.length) {
+      // Break at the last space instead of mid-word, and drop that space.
+      let space = -1;
+      for (let cursor = end - 1; cursor > index; cursor -= 1) if (cells[cursor].glyph === ' ') { space = cursor; break; }
+      if (space > index) end = space;
+    }
+    let stop = end;
+    while (stop > index && cells[stop - 1].glyph === ' ') stop -= 1;
+    lines.push(rebuild(cells, index, stop, lines.length ? hang : ''));
+    index = end;
+    while (index < cells.length && cells[index].glyph === ' ') index += 1;
+  }
+  return lines;
+}
+
+function rebuild(cells, from, to, prefix) {
+  const out = prefix ? [[prefix, null]] : [];
+  for (let index = from; index < to; index += 1) {
+    const cell = cells[index];
+    const last = out[out.length - 1];
+    if (last && last[1] === cell.token) last[0] += cell.glyph;
+    else out.push([cell.glyph, cell.token]);
+  }
+  return out;
+}
+
 export function alignRow(left, stats, width) {
   if (width <= 0) return '';
   const limit = width - STATS_WIDTH;

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { agentBody, agentHeader, agentSnapshot, component, fingerprint, isActive, pipelineBody, pipelineHeader, PREVIEW_LINES, COMPACT_WIDTH } from '../src/transcript.mjs';
+import { actionText, agentBody, agentHeader, agentSnapshot, component, flattenReport, fingerprint, isActive, pipelineBody, pipelineHeader, REPORT_LIMIT, COMPACT_WIDTH } from '../src/transcript.mjs';
 import { measure } from '../src/columns.mjs';
 
 const agent = (extra = {}) => ({ label: 'List overview exports', role: 'scout', model: 'deepseek-v4.1-flash',
@@ -67,14 +67,55 @@ test('a pipeline is a controlled block: header progress, ├ then └, one facts
   assert.equal(lines.length, 6);
 });
 
-test('an expanded row shows the report, capped, and says how much it hid', () => {
-  const text = Array.from({ length: PREVIEW_LINES + 2 }, (_, i) => `line ${i}`).join('\n\n');
-  const lines = flat(agentBody(agent({ text }), { width: 80, expanded: true }));
-  assert.equal(lines.length, 1 + PREVIEW_LINES + 1);
+test('an expanded row shows the whole report, not the first six lines', () => {
+  const text = Array.from({ length: 9 }, (_, i) => `line ${i}`).join('\n\n');
+  const lines = flat(agentBody(agent({ text }), { width: 120, expanded: true }));
+  assert.equal(lines.length, 1 + 9, 'one facts line and every report line');
   assert.match(lines[1], /^ {4}line 0$/);
-  assert.match(lines.at(-1), /^ {4}… 2 more lines$/);
+  assert.match(lines.at(-1), /^ {4}line 8$/, 'the ending is reachable');
+  assert.doesNotMatch(lines.join('\n'), /more lines/);
   assert.deepEqual(flat(agentBody(agent({ text }), { width: 120 })), ['  ⎿ Done · deepseek-v4.1-flash · 2 turns · 3 tool uses · 5.4k token · 41s'],
     'collapsed rows stay one line');
+});
+
+test('markdown flattens: no pipes, no backticks, no heading marks, rules dropped', () => {
+  assert.deepEqual(flattenReport([
+    '## Exports', '', '| Export | Value |', '|---|---|', '| `TIME_WIDTH` | `7` |', '**Bold** claim',
+  ].join('\n')), ['Exports', 'Export · Value', 'TIME_WIDTH · 7', 'Bold claim']);
+});
+
+test('an expanded row names what the child actually ran, once, before the report', () => {
+  const actions = ['read src/columns.mjs', 'grep export', 'read README.md', 'bash npm test', 'read CHANGELOG.md'];
+  const lines = flat(agentBody(agent({ actions, text: 'done' }), { width: 126, expanded: true }));
+  assert.equal(lines[1], '    read src/columns.mjs · grep export · read README.md · bash npm test · +1 more');
+  assert.equal(lines[2], '    done');
+  assert.equal(actionText({ actions: [] }), '');
+  const narrow = actionText({ actions }, 40);
+  assert.ok(measure(narrow) <= 40, `${measure(narrow)} > 40`);
+  assert.match(narrow, /\+\d+ more$/);
+  assert.deepEqual(flat(agentBody(agent({ actions, text: 'done' }), { width: 126 })).length, 1,
+    'collapsed rows do not spend a line on actions');
+});
+
+test('a long report line wraps under the row instead of being clipped', () => {
+  const text = 'word '.repeat(60).trim();
+  const lines = flat(agentBody(agent({ text }), { width: 80, expanded: true }));
+  assert.ok(lines.length > 2, 'the line became several');
+  for (const line of lines.slice(1)) {
+    assert.match(line, /^ {4}\S/, 'continuations keep the hang indent');
+    assert.ok(measure(line) <= 80, `${measure(line)} > 80`);
+  }
+  assert.equal(lines.slice(1).map(line => line.trim()).join(' '), text, 'no words lost or duplicated');
+});
+
+test("a report at the parent's cap says it was cut", () => {
+  const lines = flat(agentBody(agent({ text: 'x'.repeat(REPORT_LIMIT) }), { width: 126, expanded: true }));
+  assert.match(lines.at(-1), /report truncated at 4000 characters/);
+});
+
+test('a chain finishing moves the header even though every agent row is settled', () => {
+  const settled = [agent({ state: 'completed' }), agent({ state: 'completed', text: 'two' })];
+  assert.notEqual(fingerprint(settled, '1/2'), fingerprint(settled, '2/2'));
 });
 
 test('every rendered line fits the width it was given, colour or not', () => {

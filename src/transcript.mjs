@@ -1,4 +1,4 @@
-import { clampSegments, formatDuration, formatTokens } from './columns.mjs';
+import { clampSegments, cut, formatDuration, formatTokens, measure, wrapSegments } from './columns.mjs';
 import { plain, stateGlyph } from './overview.mjs';
 
 // The transcript row for a delegated launch. Pi renders a tool row in two slots —
@@ -10,7 +10,10 @@ import { plain, stateGlyph } from './overview.mjs';
 // row per agent, a ⎿ line of facts under it, and the report underneath when the
 // row is expanded.
 
-export const PREVIEW_LINES = 6;
+// How many distinct actions a row admits to naming before it counts the rest.
+export const MAX_ACTIONS = 4;
+// The parent stores at most this much of a report, so a full row can say so.
+export const REPORT_LIMIT = 4000;
 // Below this width the model name costs more than it explains.
 export const COMPACT_WIDTH = 90;
 
@@ -52,13 +55,58 @@ function statsLine(agent, width, at) {
     : [indent(at), ['⎿ ', 'dim'], ...facts(agent, width)])];
 }
 
-function previewLines(agent, at, expanded) {
-  if (!expanded || !agent.text) return [];
-  const lines = String(agent.text).split('\n').map(line => plain(line)).filter(line => line.trim());
-  const shown = lines.slice(0, PREVIEW_LINES);
-  const rest = lines.length - shown.length;
-  const out = shown.map(line => [indent(at), [line.trim(), 'muted']]);
-  if (rest > 0) out.push([indent(at), [`… ${rest} more ${rest === 1 ? 'line' : 'lines'}`, 'dim']]);
+// The action line is one line: it names as many actions as fit and counts the
+// rest, rather than growing past the pane and being clipped without a word.
+export function actionText(agent, width = 0) {
+  const all = Array.isArray(agent.actions) ? agent.actions.filter(action => typeof action === 'string' && action) : [];
+  if (!all.length) return '';
+  let shown = all.slice(0, MAX_ACTIONS);
+  for (;;) {
+    const rest = all.length - shown.length;
+    const text = rest > 0 ? `${shown.join(' · ')} · +${rest} more` : shown.join(' · ');
+    if (!width || measure(text) <= width) return text;
+    if (shown.length <= 1) return `${cut(shown[0], Math.max(4, width - 1))}…`;
+    shown = shown.slice(0, -1);
+  }
+}
+
+const TABLE_RULE = /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$/;
+
+// A report is markdown, and markdown at 126 columns is mostly pipes. Table rows
+// become "cell · cell · cell", heading marks and backticks go, and the rule rows
+// that carry no information are dropped entirely.
+export function flattenReport(text) {
+  const lines = String(text ?? '').split('\n').map(line => plain(line).trim());
+  const out = [];
+  for (const line of lines) {
+    if (!line) continue;
+    if (TABLE_RULE.test(line)) continue;
+    const cells = line.includes('|') ? line.split('|').map(cell => cell.trim()).filter(Boolean) : [line];
+    const joined = cells.join(' · ')
+      .replace(/`/g, '')
+      .replace(/^#{1,6}\s+/, '')
+      .replace(/\*\*(.+?)\*\*/g, '$1')
+      .replace(/__(.+?)__/g, '$1')
+      .trim();
+    if (joined) out.push(joined);
+  }
+  return out;
+}
+
+// Expanded means the whole report: it wraps to the pane instead of being clipped,
+// and nothing is left saying "… 21 more lines" with no way to reach line seven.
+function previewLines(agent, at, expanded, width) {
+  if (!expanded) return [];
+  const out = [];
+  const room = Math.max(8, Math.floor((Number(width) || 120) - at));
+  const actions = actionText(agent, room);
+  if (actions) out.push([indent(at), [actions, 'dim']]);
+  for (const line of flattenReport(agent.text)) {
+    for (const wrapped of wrapSegments([[line, 'muted']], room)) out.push([indent(at), ...wrapped]);
+  }
+  if (String(agent.text ?? '').length >= REPORT_LIMIT) {
+    out.push([indent(at), [`… report truncated at ${REPORT_LIMIT} characters`, 'dim']]);
+  }
   return out;
 }
 
@@ -81,7 +129,7 @@ export function pipelineHeader({ title, done, total }, { hint } = {}) {
 }
 
 export function agentBody(agent, { width, expanded } = {}) {
-  return [statsLine(agent, width, 2), ...previewLines(agent, 4, expanded)];
+  return [statsLine(agent, width, 2), ...previewLines(agent, 4, expanded, width)];
 }
 
 // One row per step, connected, each with its own ⎿ line: a chain is sequential,
@@ -93,21 +141,26 @@ export function pipelineBody({ agents }, { width, expanded, now = Date.now() } =
     const [symbol, token] = stateGlyph(agent.state, now);
     const row = [indent(2), [last ? '└ ' : '├ ', 'dim'], [symbol, token], [' ', null], [plain(agent.label || 'agent'), 'bold']];
     if (agent.role) row.push([' ', null], [`(${plain(agent.role)})`, 'muted']);
-    lines.push(row, statsLine(agent, width, 6), ...previewLines(agent, 8, expanded));
+    lines.push(row, statsLine(agent, width, 6), ...previewLines(agent, 8, expanded, width));
   });
   return lines;
 }
 
 export const agentSnapshot = agent => ({
   label: agent.label, role: agent.role, model: agent.model, state: agent.state,
-  tokens: agent.tokens, turns: agent.turns, toolUses: agent.toolUses, seconds: agent.seconds, text: agent.text,
+  tokens: agent.tokens, turns: agent.turns, toolUses: agent.toolUses, seconds: agent.seconds,
+  actions: agent.actions, text: agent.text,
 });
 
 // What has to change for the row to be worth repainting.
-export const fingerprint = agents => JSON.stringify(agents.map(agent => [
+// `progress` matters as much as the agents: a chain's done/total comes from
+// chain.json, so a step finishing can move the header while every agent row is
+// already settled — and a row that only hashes its agents keeps the old count.
+export const fingerprint = (agents, progress = '') => JSON.stringify([progress, agents.map(agent => [
   agent.label, agent.role, agent.state, agent.tokens, agent.turns, agent.toolUses, agent.seconds,
+  Array.isArray(agent.actions) ? agent.actions.length : 0,
   agent.text ? String(agent.text).length : 0,
-]));
+])]);
 
 export function toLines(lines, width) {
   return lines.map(segments => clampSegments(segments, width).segments);

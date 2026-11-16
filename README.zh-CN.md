@@ -120,7 +120,22 @@ BTW 回传是可选操作：普通回答结束后提示“答案已就绪 · 可
 
 图形与界面其他位置同一套点状动画，而且确实会转：运行中的行每 170 毫秒自行重绘，因此子会话静默思考时看起来仍然活着。完成后变为实心绿点，失败或中断变红，尚未开始保持空心。`⎿` 行给出状态词、模型、子会话已用轮数与工具调用数、当前 token 数，结束后再给出耗时。这些数字读自子会话文件，变化时该行自动重绘，长链条不会卡在 “Running”。尚未启动的步骤显示 `Waiting for the previous step`，而不是一堆 0。
 
-窄于 90 列时先省略模型名。`ctrl+o` 展开每个 agent 报告的前六行非空内容——段落之间的空行会被跳过，不占用这六行——并说明还有多少行。完整文本仍在结果消息和 `rex_tasks` 中。
+窄于 90 列时先省略模型名。
+
+`ctrl+o` 展开的是**完整报告**，而且展开后这一行仍然继续更新：
+
+```
+● Pipeline · row render check · 2/2 done (ctrl+o to collapse)
+  └ ● Check formatter boundaries (reviewer)
+      ⎿ Done · mimo-v2.6-pro · 2 turns · 2 tool uses · 21.0k token · 1m 07s
+        read src/columns.mjs · read README.md · +1 more
+        All 8 formatter claims in README.md are TRUE.
+        Minutes below an hour · src/columns.mjs:46–48 · TRUE
+```
+
+`⎿` 下面第一行是子会话真正做过的事：调用过的工具及其操作的文件或命令，去重后按子会话的工作目录缩短路径，一行放得下多少就写多少，其余计为 `+N more`。这正是展开的意义——上面的数字只说做了多少，这一行说做了什么。
+
+报告本身是 markdown，而在终端宽度下 markdown 大半是竖线，所以先摊平再绘制：表格行变成 `单元格 · 单元格 · 单元格`，`|---|` 分隔行直接丢弃，反引号和标题记号一并去掉。文本按窗格宽度换行并使用悬挂缩进，而不是在右边界被裁掉，因此表格行不会丢掉判定列。这里没有“还有 N 行”的死角，因为没有第二次展开可以去看。唯一例外是父会话对存储报告 4000 字符的上限；触及上限时该行会写明 `… report truncated at 4000 characters`，而不是像结束时那样戛然而止。
 
 ## 主页面任务概览
 

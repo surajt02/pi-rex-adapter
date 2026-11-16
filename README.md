@@ -162,7 +162,24 @@ A single agent has no header of its own, because its glyph already carries the s
 
 The glyph is the same dot cycle as the rest of the UI, and it really does spin: a running row repaints on its own every 170 ms, so a child that is thinking silently still looks alive. It settles into a filled green dot when the agent finished, red when it failed or was interrupted, and stays hollow for a step that has not started. The `⎿` line carries the state word, the model, how many turns and tool calls the child has taken, its current token count, and — once it finishes — how long it ran. Those numbers are read from the child's own session file, and the row repaints itself when they change, so a long chain updates in place instead of freezing at "Running". A step that has not launched says `Waiting for the previous step` rather than showing zeros.
 
-Below 90 columns the model name is dropped to keep the numbers. `ctrl+o` expands each agent to the first six non-blank lines of its report — blank lines between paragraphs are dropped rather than spent from the six — and says how many more lines there are. The full text is always in the result message and in `rex_tasks`.
+Below 90 columns the model name is dropped to keep the numbers.
+
+`ctrl+o` expands each agent to **the whole report**, and the row keeps working while it is open:
+
+```
+● Pipeline · row render check · 2/2 done (ctrl+o to collapse)
+  └ ● Check formatter boundaries (reviewer)
+      ⎿ Done · mimo-v2.6-pro · 2 turns · 2 tool uses · 21.0k token · 1m 07s
+        read src/columns.mjs · read README.md · +1 more
+        All 8 formatter claims in README.md are TRUE.
+        Minutes below an hour · src/columns.mjs:46–48 · TRUE
+        Switches to Nh NNm past an hour · :50,52 · TRUE
+        Clamps at 99h+ · :51 · TRUE
+```
+
+The first line under `⎿` is what the child actually ran: the tools it called with the file or command each one touched, deduplicated, paths shortened against the directory the child ran in, as many as fit on one line and `+N more` for the rest. That line is why the row is worth expanding — the numbers say how much work happened, this says *what* happened.
+
+The report itself is markdown, and markdown at terminal width is mostly pipes, so it is flattened before it is drawn: table rows become `cell · cell · cell`, the `|---|` rules are dropped, backticks and heading marks go with them. Text wraps to the pane with a hanging indent instead of being clipped at the right edge, so a table row keeps its verdict column instead of losing half of it. Nothing is hidden behind a "… more lines" count, because there is no second expansion to reach it with. The one exception is the parent's 4000-character cap on a stored report; when a row hits it, the row says `… report truncated at 4000 characters` rather than stopping mid-sentence as if that were the end.
 
 ## Task overview and controls
 

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { STATS_WIDTH, TIME_WIDTH, TOKEN_WIDTH, alignRow, cut, formatDuration, formatTokens,
-  measure, statsBlank, statsText } from '../src/columns.mjs';
+  measure, statsBlank, statsText, wrapSegments } from '../src/columns.mjs';
 
 const red = text => `\x1b[38;5;167m${text}\x1b[0m`;
 const green = text => `\x1b[38;5;35m${text}\x1b[0m`;
@@ -64,4 +64,20 @@ test('cut is grapheme-safe and width-aware', () => {
   assert.equal(cut('abcdef', 0), '');
   assert.equal(cut('中文中文', 4), '中文');
   assert.equal(measure(cut('\x1b[31mabcdef\x1b[0m', 2)), 2);
+});
+
+test('wrapSegments breaks at spaces, keeps the hang indent, and preserves paint', () => {
+  const painted = [['alpha beta ', 'dim'], ['gamma delta', 'muted']];
+  const lines = wrapSegments(painted, 12, '  ');
+  assert.equal(lines.length, 3);
+  assert.deepEqual(lines[0], [['alpha beta', 'dim']], 'trailing space dropped at the break');
+  assert.deepEqual(lines[1], [['  ', null], ['gamma', 'muted']]);
+  assert.deepEqual(lines[2], [['  ', null], ['delta', 'muted']]);
+  for (const line of lines) assert.ok(measure(line.map(([text]) => text).join('')) <= 12);
+});
+
+test('wrapSegments hard-breaks a line with nothing to break on, and never loses a glyph', () => {
+  const lines = wrapSegments([['x'.repeat(25), 'muted']], 10);
+  assert.deepEqual(lines.map(line => line.map(([text]) => text).join('')), ['x'.repeat(10), 'x'.repeat(10), 'x'.repeat(5)]);
+  assert.deepEqual(wrapSegments([], 10), []);
 });

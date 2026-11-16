@@ -127,7 +127,7 @@ export default function adapter(pi, dependencies = {}) {
       if (!row) return undefined;
       return { agents: [agentSnapshot({
         label: row.label, role: row.role, model: row.model, state: row.taskState,
-        tokens: row.tokens, turns: row.turns, toolUses: row.toolUses,
+        tokens: row.tokens, turns: row.turns, toolUses: row.toolUses, actions: row.actions,
         seconds: row.endedAt ? elapsedSeconds(row) : undefined, text: row.result,
       })] };
     }
@@ -136,6 +136,7 @@ export default function adapter(pi, dependencies = {}) {
     return { title: group.title, done: group.done, total: group.total, agents: group.steps.map(step => agentSnapshot({
       label: step.label, role: step.row?.role || step.agent, model: step.row?.model, state: step.state,
       tokens: step.row?.tokens, turns: step.row?.turns, toolUses: step.row?.toolUses,
+      actions: step.row?.actions,
       seconds: step.row?.endedAt ? elapsedSeconds(step.row) : undefined,
       text: step.row?.result || (step.state === 'failed' ? step.row?.error : undefined),
     })) };
@@ -150,7 +151,7 @@ export default function adapter(pi, dependencies = {}) {
     for (const entry of transcriptRows.values()) {
       const snapshot = transcriptAgents(entry);
       if (!snapshot?.agents?.length) continue;      // keep the last known state
-      const print = fingerprint(snapshot.agents);
+      const print = fingerprint(snapshot.agents, Number.isFinite(snapshot.total) ? `${snapshot.done}/${snapshot.total}` : '');
       if (print === entry.print) continue;
       entry.print = print; entry.snapshot = snapshot;
       entry.spinning = snapshot.agents.some(agent => spinning(agent.state));
@@ -307,7 +308,7 @@ export default function adapter(pi, dependencies = {}) {
           const settled = ['completed', 'failed', 'interrupted', 'cancelled'].includes(row.taskState);
           rows.push({ ...row, task: fit(run.task || '', 240), summary: undefined, cleanupError: cleanupErrors.get(id),
             label: resolveLabel(run), role: run.role, chain: run.chain, model: run.model,
-            tokens: usage.tokens, turns: usage.turns, toolUses: usage.toolUses,
+            tokens: usage.tokens, actions: usage.actions, turns: usage.turns, toolUses: usage.toolUses,
             result: latestResult?.text ? String(latestResult.text).slice(0, 4000) : undefined,
             endedAt: settled ? latestResult?.createdAt || exit?.at : undefined });
         }
