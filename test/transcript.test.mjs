@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { actionText, agentBody, agentHeader, agentSnapshot, component, flattenReport, fingerprint, isActive, pipelineBody, pipelineHeader, REPORT_LIMIT, COMPACT_WIDTH } from '../src/transcript.mjs';
+import { actionText, agentBody, agentHeader, agentSnapshot, chainSnapshot, component, flattenReport, fingerprint, isActive, pipelineBody, pipelineHeader, REPORT_LIMIT, COMPACT_WIDTH } from '../src/transcript.mjs';
 import { measure } from '../src/columns.mjs';
 
 const agent = (extra = {}) => ({ label: 'List overview exports', role: 'scout', model: 'deepseek-v4.1-flash',
@@ -151,4 +151,23 @@ test('the fingerprint moves when anything worth repainting moves', () => {
   assert.notEqual(fingerprint([agentSnapshot(agent({ seconds: 42 }))]), base);
   assert.equal(isActive('running'), true);
   assert.equal(isActive('completed'), false);
+});
+
+test('a finished chain still knows its count after its panes closed themselves', () => {
+  const record = { id: 'c1', title: 'row render check', status: 'completed', steps: [
+    { index: 0, agent: 'scout', label: 'List column helpers', status: 'completed', text: 'one' },
+    { index: 1, agent: 'reviewer', label: 'Check formatter boundaries', status: 'completed', text: 'two' },
+  ] };
+  // What the row last drew while the panes existed: one step done, the other running.
+  const previous = { title: 'row render check', done: 1, total: 2, agents: [
+    agent({ label: 'List column helpers', state: 'completed', text: 'one' }),
+    agent({ label: 'Check formatter boundaries', role: 'reviewer', state: 'running', tokens: 900, text: 'two' }),
+  ] };
+  const snapshot = chainSnapshot(record, previous);
+  assert.equal(snapshot.done, 2, 'the count comes from the record, not the snapshot');
+  assert.equal(snapshot.total, 2);
+  assert.deepEqual(snapshot.agents.map(a => a.state), ['completed', 'completed']);
+  assert.equal(snapshot.agents[1].tokens, 900, 'numbers measured while the pane existed are kept');
+  assert.equal(snapshot.agents[1].role, 'reviewer');
+  assert.equal(chainSnapshot({ steps: [] }, previous), undefined, 'a record with no steps says nothing');
 });

@@ -113,6 +113,39 @@ test('the summary reports every step once, and points at a failure', async () =>
   assert.match(failed, /still open for inspection: run-2/);
 });
 
+test('a finished chain still reads N/N after its own panes closed', async t => {
+  const client = fakeRex();
+  const h = await fixture(t, client);
+  const started = JSON.parse((await h.call('pipeline', {
+    title: 'row check',
+    steps: [{ agent: 'scout', label: 'Map auth', task: 'map it' }, { agent: 'worker', label: 'Add test', task: 'fix it' }],
+  })).content[0].text);
+  const chainFile = join(started.artifacts, 'chain.json');
+
+  await turn(join(h.root, started.first), 'mapped');
+  await until(async () => JSON.parse(await readFile(chainFile, 'utf8')).steps[1]?.runId, 'step two');
+  const second = JSON.parse(await readFile(chainFile, 'utf8')).steps[1].runId;
+  await turn(join(h.root, second), 'fixed');
+
+  const theme = { bold: text => text, fg: (_token, text) => text };
+  // The count is in the call slot and the steps are in the result slot; a row is both.
+  const args = { title: 'row check', steps: [{ agent: 'scout', label: 'Map auth' }, { agent: 'worker', label: 'Add test' }] };
+  const render = () => {
+    const context = () => ({ toolCallId: 'call', args, invalidate() {}, state: {}, cwd: h.ctx.cwd });
+    const head = h.tools.pipeline.renderCall(args, theme, context()).render(126).join('\n');
+    const body = h.tools.pipeline.renderResult(
+      { content: [], details: {} }, { expanded: false, isPartial: false }, theme, context(),
+    ).render(126).join('\n');
+    return `${head}\n${body}`;
+  };
+
+  // finishChain closes every completed step pane, so the rows are gone by the time
+  // the last step reports; the count has to come from the chain record instead.
+  await until(() => /2\/2 done/.test(render()), 'the finished count');
+  assert.match(render(), /Add test \(worker\)/, 'the closed step is still named');
+  assert.match(render(), /Map auth \(scout\)/);
+});
+
 test('a delegated agent must state its goal in six words, and the label is recorded for the list', async t => {
   const client = fakeRex();
   const h = await fixture(t, client);

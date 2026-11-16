@@ -153,6 +153,30 @@ export const agentSnapshot = agent => ({
 });
 
 // What has to change for the row to be worth repainting.
+// A chain outlives its panes. finishChain closes every completed step, so the
+// rows that produced this snapshot are gone by the time the last step reports —
+// which is why the count froze at n-1/N. The chain record still knows, so the
+// header and the states come from it, and the numbers we last measured are kept
+// for the rows that no longer exist.
+export function chainSnapshot(record, previous) {
+  const steps = Array.isArray(record?.steps) ? record.steps : [];
+  if (!steps.length) return undefined;
+  const before = Array.isArray(previous?.agents) ? previous.agents : [];
+  return {
+    title: record.title,
+    done: steps.filter(step => step.status === 'completed').length,
+    total: steps.length,
+    agents: steps.map((step, index) => {
+      const kept = before[index] || {};
+      return agentSnapshot({
+        label: step.label || kept.label, role: step.agent || kept.role, model: kept.model,
+        state: step.status, tokens: kept.tokens, turns: kept.turns, toolUses: kept.toolUses,
+        seconds: kept.seconds, actions: kept.actions, text: step.text || kept.text,
+      });
+    }),
+  };
+}
+
 // `progress` matters as much as the agents: a chain's done/total comes from
 // chain.json, so a step finishing can move the header while every agent row is
 // already settled — and a row that only hashes its agents keeps the old count.

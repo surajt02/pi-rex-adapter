@@ -16,7 +16,7 @@ import { createDialogs } from './dialog.mjs';
 import { DEFAULT_CONFIG, loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
 import { taskRow, showOverview, activeOverviewRows, visibleRows, orderRows, rowLabel, plain, fit, buildGroups, FRAME_MS } from './overview.mjs';
-import { agentSnapshot, agentBody, agentHeader, pipelineBody, pipelineHeader, fingerprint, component, spinning } from './transcript.mjs';
+import { agentSnapshot, agentBody, agentHeader, chainSnapshot, pipelineBody, pipelineHeader, fingerprint, component, spinning } from './transcript.mjs';
 
 const runner = fileURLToPath(new URL('./runner.mjs', import.meta.url));
 const textResult = value => ({ content: [{ type: 'text', text: JSON.stringify(value) }], details: value });
@@ -132,7 +132,7 @@ export default function adapter(pi, dependencies = {}) {
       })] };
     }
     const group = buildGroups(overviewRows, chainMap).groups.find(candidate => candidate.id === entry.chainId);
-    if (!group) return undefined;
+    if (!group) return chainSnapshot(chainMap.get(entry.chainId), entry.snapshot);
     return { title: group.title, done: group.done, total: group.total, agents: group.steps.map(step => agentSnapshot({
       label: step.label, role: step.row?.role || step.agent, model: step.row?.model, state: step.state,
       tokens: step.row?.tokens, turns: step.row?.turns, toolUses: step.row?.toolUses,
@@ -313,11 +313,20 @@ export default function adapter(pi, dependencies = {}) {
             endedAt: settled ? latestResult?.createdAt || exit?.at : undefined });
         }
       }
-      const chains = new Map();
-      for (const row of rows) {
-        const chainId = row.chain?.id;
-        if (!chainId || chains.has(chainId)) continue;
-        chains.set(chainId, await readChain(root, chainId).catch(() => undefined));
+      // Merged, not rebuilt: a finished chain closes its own panes, so its record is
+      // the only thing left that knows how many steps it had. It also has to be
+      // re-read until it reaches a terminal state — the scan that would have seen
+      // "completed" is the scan with no rows left to ask about it. Once terminal a
+      // record is never read again, so an old chain costs nothing.
+      const chains = new Map(chainMap);
+      const refreshChains = new Set();
+      for (const row of rows) if (row.chain?.id) refreshChains.add(row.chain.id);
+      for (const [chainId, record] of chains) {
+        if (!record || (record.status !== 'completed' && record.status !== 'failed')) refreshChains.add(chainId);
+      }
+      for (const chainId of refreshChains) {
+        const record = await readChain(root, chainId).catch(() => undefined);
+        if (record) chains.set(chainId, record);
       }
       if (epoch !== generation) return;
       chainMap = chains;
