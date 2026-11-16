@@ -2,6 +2,22 @@ import { join } from 'node:path';
 import { atomicJson, readJson, runStatus, withLayoutLock } from './core.mjs';
 
 export const directRun = run => run.runtime === 'direct-pi' && run.block && !run.closed;
+
+// A launch that never came back verified leaves a run with no block, no exit and
+// nothing to observe — the one state nothing else can settle, because without a
+// block id there is nothing to inspect and no process to watch. Two minutes is
+// long enough for a slow Rex to answer and for the child to write its first
+// activity; after that the step is reported as failed so a chain cannot wait on
+// it forever. The run itself is left alone: if a process did start, it stays
+// visible as unverified rather than being called a failure we cannot check.
+export const UNCERTAIN_GRACE_MS = 120_000;
+
+export function stalledLaunch(run, now, grace = UNCERTAIN_GRACE_MS) {
+  if (run?.status !== 'launching' && run?.status !== 'uncertain') return false;
+  if (run.block || run.closed) return false;
+  const started = Date.parse(run.createdAt);
+  return Number.isFinite(started) && now - started >= grace;
+}
 export const missingBlock = (error, run) => error.code === 'REX_BLOCK_NOT_FOUND' &&
   error.block === run.block && error.rexSession === run.rexSession;
 

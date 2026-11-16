@@ -11,7 +11,7 @@ import { MAX_STEPS, createChain, readChain, writeChain, chainSummary, composeTas
 import { registerChild } from './child.mjs';
 import { checkLabel, deriveLabel, resolveLabel } from './labels.mjs';
 import { readUsage } from './usage.mjs';
-import { directRun, observeLifecycles } from './lifecycle.mjs';
+import { directRun, observeLifecycles, stalledLaunch } from './lifecycle.mjs';
 import { createDialogs } from './dialog.mjs';
 import { DEFAULT_CONFIG, loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
@@ -194,7 +194,9 @@ export default function adapter(pi, dependencies = {}) {
     if (direct === controlsDirect) return;
     controlsDirect = direct;
     for (const [name, definition] of toolDefinitions) {
-      if (['subagent', 'pipeline', 'btw', 'bg_run'].includes(name) || name === 'rex_finish' && process.env.REX_SESSION && process.env.REX_BLOCK) continue;
+      const directAlways = ['subagent', 'pipeline', 'btw', 'bg_run'].includes(name);
+      const directInRex = name === 'rex_finish' && process.env.REX_SESSION && process.env.REX_BLOCK;
+      if (directAlways || directInRex) continue;
       pi.registerTool({ ...definition, exposure: direct ? 'direct' : 'deferred' });
     }
   }
@@ -266,6 +268,16 @@ export default function adapter(pi, dependencies = {}) {
           receipts = files.filter(n => /^turn-.*\.json$/.test(n));
           if ((exit && (exit.code !== 0 || exit.taskIncomplete || !latestResult) && !run.taskCompletedBeforeClose) || run.status === 'cancelled') receipts.push('exit.json');
         } else receipts = exit || run.status === 'cancelled' ? ['result.json'] : [];
+        if (run.chain && !receipts.length && !run.closed && !exit && stalledLaunch(run, Date.now())) {
+          // No block id was ever confirmed, so nothing can observe this run: it would
+          // otherwise sit in `tracked` and leave the chain running with no report.
+          const synthetic = `${id}/stalled.json`;
+          if (!chainSeen.has(synthetic)) {
+            chainSeen.add(synthetic);
+            startChainStep(run, { turn: false, status: 'failed',
+              text: `The step never reported: its launch was never verified (${run.error || 'no pane id'}), so there was nothing to observe. It may still be running in Rex as ${run.name}.` });
+          }
+        }
         if (run.chain && !receipts.length && (run.closed || exit)) {
           // A step whose pane closed or process died without writing a turn must
           // still end the chain rather than leave it waiting for a report.

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { Rex, prepareRun, atomicJson, readJson, directPiCommand, runStates } from '../src/core.mjs';
-import { observeLifecycles, recordLifecycle, rexExit } from '../src/lifecycle.mjs';
+import { observeLifecycles, recordLifecycle, rexExit, stalledLaunch } from '../src/lifecycle.mjs';
 import { choosePlacement, withLayoutLock } from '../src/layout.mjs';
 import adapter from '../src/index.mjs';
 
@@ -223,4 +223,16 @@ test('Rex event transport decodes session envelopes and ignores foreign sessions
   }));
   assert.equal(ready, 1); assert.equal(received.length, 2);
   assert.equal(received[1].type, 'block_closed');
+});
+
+test('only a launch with nothing to observe counts as stalled', () => {
+  const now = Date.parse('2026-01-01T00:10:00Z');
+  const made = createdAt => ({ createdAt, status: 'uncertain', name: 'scout 1/2 · t' });
+  assert.equal(stalledLaunch(made('2026-01-01T00:08:00Z'), now), true, 'two minutes with no block is stalled');
+  assert.equal(stalledLaunch(made('2026-01-01T00:09:30Z'), now), false, 'half a minute is still a launch');
+  assert.equal(stalledLaunch({ ...made('2026-01-01T00:00:00Z'), block: 'block:1' }, now), false, 'a block id can be observed');
+  assert.equal(stalledLaunch({ ...made('2026-01-01T00:00:00Z'), closed: true }, now), false, 'a closed run needs no watchdog');
+  assert.equal(stalledLaunch({ ...made('2026-01-01T00:00:00Z'), status: 'running' }, now), false, 'a running child is not stalled');
+  assert.equal(stalledLaunch({ status: 'launching' }, now), false, 'no start time means no clock to run out');
+  assert.equal(stalledLaunch(made('2026-01-01T00:00:00Z'), now, 60_000), true, 'the grace is a parameter');
 });

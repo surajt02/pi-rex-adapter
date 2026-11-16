@@ -108,9 +108,44 @@ test('the summary reports every step once, and points at a failure', async () =>
   chain.status = 'failed';
   chain.steps[1].status = 'failed';
   chain.steps[1].error = 'turn failed';
+  chain.steps[1].block = 'block:abc';
   const failed = chainSummary(chain, { artifacts: '/tmp/chain-1' });
   assert.match(failed, /Failing step report \(worker\)/);
-  assert.match(failed, /still open for inspection: run-2/);
+  assert.match(failed, /still open for inspection: block:abc/, 'a confirmed pane is named by its block');
+
+  delete chain.steps[1].block;
+  assert.match(chainSummary(chain, { artifacts: '/tmp/chain-1' }),
+    /left no pane to inspect/, 'a launch that was never verified has no pane to point at');
+});
+
+test('a launch that is never verified fails its step instead of stalling the chain', async t => {
+  const client = fakeRex();
+  // Rex never answers: the block may exist, but no id comes back, so nothing can
+  // observe the run and no receipt can ever arrive.
+  client.open = async () => { throw new Error('rex: connection timed out'); };
+  const h = await fixture(t, client);
+  const started = JSON.parse((await h.call('pipeline', {
+    title: 'timeout',
+    steps: [{ agent: 'scout', label: 'Map auth', task: 'map it' }, { agent: 'worker', label: 'Add test', task: 'fix it' }],
+  })).content[0].text);
+  const chainFile = join(started.artifacts, 'chain.json');
+  const stepDir = join(h.root, started.first);
+  await until(async () => (await readFile(join(stepDir, 'run.json'), 'utf8')).includes('uncertain'), 'the uncertain run');
+
+  // Age the run past the grace instead of waiting two real minutes.
+  const run = JSON.parse(await readFile(join(stepDir, 'run.json'), 'utf8'));
+  assert.equal(run.status, 'uncertain');
+  await writeFile(join(stepDir, 'run.json'), JSON.stringify({ ...run, createdAt: new Date(Date.now() - 5 * 60_000).toISOString() }));
+
+  await until(async () => JSON.parse(await readFile(chainFile, 'utf8')).status === 'failed', 'the chain to fail');
+  const chain = JSON.parse(await readFile(chainFile, 'utf8'));
+  assert.equal(chain.steps[0].status, 'failed');
+  assert.equal(chain.steps[1].runId, undefined, 'the second step is never launched');
+  assert.match(chain.steps[0].text, /never verified/);
+  let message;
+  await until(() => { const value = h.boundary(); if (value) message = value.entries.at(-1); return Boolean(value); }, 'the failed chain report');
+  assert.match(message.content, /: failed/);
+  assert.match(message.content, /left no pane to inspect/);
 });
 
 test('a finished chain still reads N/N after its own panes closed', async t => {

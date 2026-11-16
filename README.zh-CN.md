@@ -217,6 +217,8 @@ Agent 和 BTW 由 Rex 直接启动 Pi：短暂的 `env` 设置任务目录与 PA
 
 `/reload` 或恢复相同父 session 会重新发现完成结果，通过已持久化消息中的 receipts 去重（兼容旧版单 receipt）。切换到另一 session 后不会把旧任务结果投递给新主线；返回原 session 时补发。退出父 Pi 不会主动关闭 Rex block，但父进程离线时不会触发模型，重新打开原 session 后才能补发。工具取消信号传递到排队后的检查、资源操作与 CLI 子进程；创建请求尚未发出时取消不会开新 block。请求已经发出后被取消、超时或返回格式异常，记录标记为 `uncertain`，不自动重试，以免重复执行。
 
+`uncertain` 记录没有 block ID，既无从检查也没有进程可观察，因此它是唯一无法自行收敛的状态。pipeline 不会为它空等：这样的步骤创建满两分钟后即判定失败（`The step never reported: its launch was never verified…`），链条随即结束，其余步骤不再启动。该任务记录本身保持原样、仍显示为待核实——连接失败从不等于进程没起来——是否关闭由你在任务菜单里决定。
+
 Shell block 在结果确认送达后自动清理；子 agent 由主 agent 通过 `rex_finish` 收尾，BTW 默认保留。也可通过 `/rex-tasks` 中的任务操作 显式关闭。重复或并发关闭同一任务幂等。关闭前已完成的任务保留原状态；关闭导致的进程退出归为 cancelled，通知仍保留信号/启动失败原因。任务记录与日志不自动删除，长驻任务日志会持续增长。对于 Shell 和旧版 runner 任务，若 runner 被 SIGKILL、Rex 崩溃或主机断电而未写出退出记录，状态可能停留在 running/uncertain，需要检查 block；不将缺失记录误判为成功。通知对普通 reload 可去重，进程崩溃与队列持久化的极小窗口内不保证事务式 exactly-once。Shell 在 POSIX 下使用独立进程组，runner 收到终止信号时转发给该组，2 秒后仍未结束则升级终止；主动脱离该组的进程不在此保证内。
 
 子进程使用 Rex 环境和父进程的 PATH，不复制主 Pi 的全部环境变量或临时凭证；模型认证应能由子 Pi 的正常配置加载。命令、子 agent 与项目扩展均以当前用户权限运行。
