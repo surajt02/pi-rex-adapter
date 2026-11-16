@@ -9,11 +9,13 @@ import { withLayoutLock, existingBtw, choosePlacement } from './layout.mjs';
 import { discoverRoles, findRole, applyRole, roleSummary } from './roles.mjs';
 import { MAX_STEPS, createChain, readChain, writeChain, chainSummary, composeTask, stepLabel, chainDirectory } from './chain.mjs';
 import { registerChild } from './child.mjs';
+import { checkLabel, deriveLabel, resolveLabel } from './labels.mjs';
+import { readUsage } from './usage.mjs';
 import { directRun, observeLifecycles } from './lifecycle.mjs';
 import { createDialogs } from './dialog.mjs';
 import { DEFAULT_CONFIG, loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
-import { taskRow, showOverview, activeOverviewRows, orderRows, rowLabel, plain, fit } from './overview.mjs';
+import { taskRow, showOverview, activeOverviewRows, visibleRows, orderRows, rowLabel, plain, fit } from './overview.mjs';
 
 const runner = fileURLToPath(new URL('./runner.mjs', import.meta.url));
 const textResult = value => ({ content: [{ type: 'text', text: JSON.stringify(value) }], details: value });
@@ -31,7 +33,7 @@ export default function adapter(pi, dependencies = {}) {
   const ui = (key, values) => t(config.language, key, values);
   const dialogs = createDialogs(() => config.language);
   let actionTimer, taskPanel;
-  let overviewEnabled = true, overviewRows = [];
+  let overviewEnabled = true, overviewRows = [], chainMap = new Map();
   const inbox = new Map();
   const closing = new Map();
   const chainSeen = new Set();
@@ -105,9 +107,10 @@ export default function adapter(pi, dependencies = {}) {
     }, 300);
   }
   function updateUI() {
-    const visible = overviewEnabled ? activeOverviewRows(overviewRows) : [];
-    const key = visible.length ? JSON.stringify(visible.map(({ id, kind, name, task, taskState }) => ({ id, kind, name, task, taskState }))) : 'empty';
-    if (key !== uiKey) { showOverview(current, overviewRows, overviewEnabled, config.language); uiKey = key; }
+    const visible = overviewEnabled ? visibleRows(overviewRows) : [];
+    const key = visible.length ? JSON.stringify(visible.map(({ id, kind, name, task, taskState, label, role, tokens, chain }) =>
+      ({ id, kind, name, task, taskState, label, role, tokens, chain: chain?.id }))) : 'empty';
+    if (key !== uiKey) { showOverview(current, overviewRows, overviewEnabled, config.language, chainMap); uiKey = key; }
     const count = activeOverviewRows(overviewRows).length;
     const status = count ? ui('active', { count }) : undefined;
     if (current?.hasUI && status !== statusText) { current.ui.setStatus('rex', status); statusText = status; }
@@ -179,9 +182,9 @@ export default function adapter(pi, dependencies = {}) {
         const run = await readJson(join(dir, 'run.json'));
         if (!run) continue;
         processRuns.push(run);
-        const [exit, activity, latestResult, files] = await Promise.all([
+        const [exit, activity, latestResult, files, usage] = await Promise.all([
           readJson(join(dir, 'exit.json')), readJson(join(dir, 'activity.json')),
-          readJson(join(dir, 'result.json')), readdir(dir),
+          readJson(join(dir, 'result.json')), readdir(dir), readUsage(run.dir),
         ]);
         if (epoch !== generation) return;
         if (run.kind === 'shell' && exit && run.block && !run.closed && delivered.has(`${id}/result.json`) && !cleanup.has(id)) cleanup.set(id, 0);
@@ -230,9 +233,20 @@ export default function adapter(pi, dependencies = {}) {
           tracked.delete(id); cleanup.delete(id); cleanupErrors.delete(id);
         } else {
           const row = taskRow(run, exit, latestResult, activity, config.language);
-          rows.push({ ...row, task: fit(run.task || '', 240), summary: undefined, cleanupError: cleanupErrors.get(id) });
+          const settled = ['completed', 'failed', 'interrupted', 'cancelled'].includes(row.taskState);
+          rows.push({ ...row, task: fit(run.task || '', 240), summary: undefined, cleanupError: cleanupErrors.get(id),
+            label: resolveLabel(run), role: run.role, chain: run.chain, tokens: usage.tokens,
+            endedAt: settled ? latestResult?.createdAt || exit?.at : undefined });
         }
       }
+      const chains = new Map();
+      for (const row of rows) {
+        const chainId = row.chain?.id;
+        if (!chainId || chains.has(chainId)) continue;
+        chains.set(chainId, await readChain(root, chainId).catch(() => undefined));
+      }
+      if (epoch !== generation) return;
+      chainMap = chains;
       if (epoch === generation) {
         overviewRows = rows; updateUI(); monitor(); monitorProcesses(processRuns); scheduleWake(); cleanBlocks();
       }
@@ -309,7 +323,7 @@ export default function adapter(pi, dependencies = {}) {
     step.status = 'running';
     await writeChain(chainRoot, chain);
     const result = await launch('agent', {
-      task: composeTask(chain, step.index), agent: step.agent,
+      task: composeTask(chain, step.index), agent: step.agent, label: step.label,
       name: `${stepLabel(step, total)} · ${chain.title}`.slice(0, 64),
       cwd: chain.cwd, model: step.model || chain.model, fork: chain.fork,
       chain: { id: chain.id, index: step.index, total, title: chain.title },
@@ -344,6 +358,8 @@ export default function adapter(pi, dependencies = {}) {
     const roles = discoverRoles(ctx.cwd);
     for (const [index, step] of steps.entries()) {
       if (!String(step?.task || '').trim()) throw new Error(`Step ${index + 1} needs a task.`);
+      const label = checkLabel(step?.label);
+      if (!label.ok) throw new Error(`Step ${index + 1}: ${label.reason}`);
       if (step.agent && !findRole(roles, step.agent)) {
         throw new Error(`Unknown agent role "${step.agent}" in step ${index + 1}. Available: ${[...roles.keys()].join(', ') || 'none'}.`);
       }
@@ -410,7 +426,7 @@ export default function adapter(pi, dependencies = {}) {
     clearInterval(timer); clearTimeout(debounce); clearTimeout(wakeTimer); wakeTimer = undefined; watcher?.close();
     watcher = undefined; timer = undefined; scanning = undefined; cleanupWorker = undefined;
     current = undefined; pending.clear(); inbox.clear(); tracked.clear(); cleanup.clear(); cleanupErrors.clear();
-    chainSeen.clear(); chainWork.clear();
+    chainSeen.clear(); chainWork.clear(); chainMap = new Map();
   }
   pi.on('session_shutdown', stop);
   pi.on('session_start', async (_event, ctx) => {
@@ -442,6 +458,10 @@ export default function adapter(pi, dependencies = {}) {
     if (!root || ctx.sessionManager.getSessionId() !== current?.sessionManager.getSessionId()) throw new Error('Session is not ready');
     if (!process.env.REX_SESSION || !process.env.REX_BLOCK) throw new Error('Start Pi inside Rex (REX_SESSION and REX_BLOCK are required).');
     const task = params.task?.trim();
+    // A delegated agent must say what its goal is in six words or fewer; the
+    // parent list is a column of goals, and a long task string erodes it.
+    const label = checkLabel(params.label);
+    if (kind === 'agent' && !label.ok) throw new Error(label.reason);
     const name = params.name?.trim() || fit(task?.split('\n')[0] || kind, 48);
     const launchRoot = root, epoch = generation;
     if (active.has(name)) throw new Error(`Launch already in progress: ${name}`);
@@ -466,6 +486,7 @@ export default function adapter(pi, dependencies = {}) {
         rexSession: process.env.REX_SESSION, anchor: process.env.REX_BLOCK,
         piBin: process.env.PI_REX_PI_BIN || process.argv[1] || 'pi',
         path: process.env.PATH,
+        label: label.ok ? label.label : undefined,
         model: params.model || (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined),
         thinking: pi.getThinkingLevel(), configCwd: ctx.cwd, chain: params.chain,
       }, params);
@@ -742,12 +763,12 @@ export default function adapter(pi, dependencies = {}) {
   }
   command('btw', 'Open an independent side conversation in a right-hand Rex block', (task, ctx) => launch('btw', { task }, ctx));
   command('bg', 'Run a shell command in a background Rex block; report completion automatically', (task, ctx) => launch('shell', { task }, ctx));
-  command('rex-agent', 'Delegate a task to a Pi process in a background Rex tab', (task, ctx) => launch('agent', { task }, ctx));
-  const fields = { task: string, name: string, cwd: string, model: string, fork: { type: 'boolean' } };
+  command('rex-agent', 'Delegate a task to a Pi process in a background Rex tab', (task, ctx) => launch('agent', { task, label: deriveLabel(task) }, ctx));
+  const fields = { task: string, name: string, label: string, cwd: string, model: string, fork: { type: 'boolean' } };
   const agentFields = { ...fields, agent: string };
   const roleHint = roleSummary(discoverRoles(process.cwd()));
-  tool('subagent', `Launch a bounded task in a persistent interactive Pi terminal in a Rex tab. Optional agent picks a role, which supplies its own model, thinking, tools and instructions${roleHint ? `: ${roleHint}` : ''}. Result arrives automatically; do not poll. Review the handoff, then promptly call rex_finish unless another agent turn is needed; retained files remain usable for integration and testing. Use separate checkouts for parallel writers.`, schema(agentFields, ['task']), (p, ctx, signal) => launch('agent', p, ctx, signal));
-  tool('pipeline', `Run an ordered chain of agent roles, one pane per step. Each step receives the overall task and the previous step's report; steps run sequentially and one combined report arrives when the chain ends (max ${MAX_STEPS} steps). Roles: ${roleHint || 'none'}. Do not poll.`, schema({ steps: { type: 'array', minItems: 1, maxItems: MAX_STEPS, items: { type: 'object', properties: { agent: string, task: string, model: string }, required: ['task'], additionalProperties: false } }, title: string, cwd: string, model: string, fork: { type: 'boolean' } }, ['steps']), (p, ctx, signal) => startPipeline(p, ctx, signal));
+  tool('subagent', `Launch a bounded task in a persistent interactive Pi terminal in a Rex tab. Optional agent picks a role, which supplies its own model, thinking, tools and instructions${roleHint ? `: ${roleHint}` : ''}. The label is required: six words or fewer naming the goal, because the parent list shows goals, not task text. Result arrives automatically; do not poll. Review the handoff, then promptly call rex_finish unless another agent turn is needed; retained files remain usable for integration and testing. Use separate checkouts for parallel writers.`, schema(agentFields, ['task', 'label']), (p, ctx, signal) => launch('agent', p, ctx, signal));
+  tool('pipeline', `Run an ordered chain of agent roles, one pane per step. Each step receives the overall task and the previous step's report; steps run sequentially and one combined report arrives when the chain ends (max ${MAX_STEPS} steps). Every step needs a label of six words or fewer naming that step's goal. Roles: ${roleHint || 'none'}. Do not poll.`, schema({ steps: { type: 'array', minItems: 1, maxItems: MAX_STEPS, items: { type: 'object', properties: { agent: string, task: string, label: string, model: string }, required: ['task', 'label'], additionalProperties: false } }, title: string, cwd: string, model: string, fork: { type: 'boolean' } }, ['steps']), (p, ctx, signal) => startPipeline(p, ctx, signal));
   tool('btw', 'Reuse the parent side conversation, or create it on the right. Supply task to queue a question; omit task to focus. Only /btw-return sends conclusions back.', schema(fields), (p, ctx, signal) => launch('btw', p, ctx, signal));
   tool('bg_run', 'Run a long shell command in a background Rex block. Use for builds/tests/servers that should not block the main task. Completion reports exit code and output automatically; do not poll.', schema({ command: string, name: string, cwd: string }, ['command']), (p, ctx, signal) => launch('shell', { ...p, task: p.command }, ctx, signal));
   tool('rex_finish', 'Promptly close a completed agent/shell block after reviewing its handoff unless further interaction is needed. Files, results and session records remain available for parent integration/testing; do not wait for the overall parent task to end. Requires a completed task and an idle or exited process; rejects BTW and active/failed tasks.', schema({ id: string }, ['id']), (p, _ctx, signal) => control(p.id, 'finish', signal));

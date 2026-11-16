@@ -81,7 +81,8 @@ function harness(dir, t) {
   }, { rex: client });
   t.after(() => events.session_shutdown());
   return { ctx, events, tools, commands, widgets, statuses, layouts, blocks,
-    launch: (kind, task) => tools[kind].execute('call', kind === 'bg_run' ? { command: task } : { task }, undefined, undefined, ctx) };
+    launch: (kind, task) => tools[kind].execute('call',
+      kind === 'bg_run' ? { command: task } : kind === 'subagent' ? { task, label: 'Delegated task' } : { task }, undefined, undefined, ctx) };
 }
 
 test('configured cap applies to agent and shell tabs, reload respects existing panes, BTW stays beside parent', async t => {
@@ -114,7 +115,8 @@ test('main-agent overview, footer and task manager switch language on reload; En
     if (language === 'zh' || h.widgets.length) await settings(dir, { language });
     await h.events.session_start({}, h.ctx);
     const widget = h.widgets.at(-1)().render(100).join('\n');
-    assert.match(widget, language === 'en' ? /Rex Tasks[\s\S]*Running/ : /Rex 任务[\s\S]*运行中/);
+    // The list shows the goal, not a translated state word: same text in both languages.
+    assert.match(widget, /review/); assert.doesNotMatch(widget, /Rex Tasks|Rex 任务|Running|运行中/);
     assert.ok(h.statuses.includes(language === 'en' ? 'Rex: 1 active' : 'Rex：1 项活跃任务'));
     let screen;
     h.ctx.ui.custom = async factory => {
@@ -136,8 +138,12 @@ test('all visible states translate; language never rewrites task text or machine
     assert.match(rowLabel(row, 'zh'), /\p{Script=Han}/u);
     assert.equal(row.taskState, taskState);
   }
-  const lines = overviewLines([{ id: 'a', kind: 'agent', name: 'review', taskState: 'running', task: '保留用户原文' }], 120);
-  assert.match(lines.join('\n'), /Running.*保留用户原文/);
+  const lines = overviewLines([{ id: 'a', kind: 'agent', name: 'review', taskState: 'running',
+    label: '保留用户原文', task: '保留用户原文' }], 120);
+  const rendered = lines.join('\n');
+  assert.match(rendered, /保留用户原文/);
+  // State is a glyph and a colour, never a translated word in the parent list.
+  assert.doesNotMatch(rendered, /Running|运行中|Completed|已完成/);
   for (const language of ['en', 'zh']) {
     const viewer = dialogComponent({ tui: { terminal: { rows: 24 } }, theme: {}, keys: {}, done() {}, title: 'Logs', text: 'output', language });
     assert.match(viewer.render(84).join('\n'), language === 'en' ? /Scroll.*Esc Back/ : /滚动.*Esc 返回/);

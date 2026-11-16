@@ -1,6 +1,8 @@
 import { stripVTControlCharacters } from 'node:util';
 import { runStates } from './core.mjs';
 import { t } from './i18n.mjs';
+import { deriveLabel } from './labels.mjs';
+import { STATS_WIDTH, alignRow, measure, statsBlank, statsText } from './columns.mjs';
 
 export function plain(value) {
   return stripVTControlCharacters(String(value ?? '')).replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -46,31 +48,149 @@ export function activeOverviewRows(rows) {
   return orderRows(rows.filter(row => row.kind !== 'btw' && !row.closed &&
     ['running', 'launching', 'uncertain'].includes(row.taskState)));
 }
+// The list shows every task whose pane is still open, not only the running ones:
+// a completed agent awaiting rex_finish and a stuck or failed pane are exactly
+// what the reader needs to see. BTW lives in its own split, never here.
+export function visibleRows(rows) {
+  return orderRows(rows.filter(row => row.kind !== 'btw' && !row.closed));
+}
 // Desaturated slate blue (#7e98ad); Theme.style handles truecolor/256-color.
 export function softBlue(theme, text) {
   return theme?.style ? theme.style(text, { fg: { kind: 'rgb', r: 126, g: 152, b: 173 } })
     : theme?.fg ? theme.fg('muted', text) : text;
 }
-export function overviewLines(rows, width, theme, language = 'en') {
-  const active = activeOverviewRows(rows);
-  if (!active.length || width <= 0) return [];
-  const color = (token, text) => theme?.fg ? theme.fg(token, text) : text;
-  const rule = softBlue(theme, '─'.repeat(width));
-  const title = fit(`${t(language, 'title')} · ${active.length}  /rex-tasks`, width);
-  const lines = [rule, softBlue(theme, title)];
-  for (const row of active.slice(0, 6)) {
-    const status = t(language, row.taskState);
-    const summary = plain(row.task);
-    const line = fit(`- ${kinds[row.kind] || row.kind} · ${plain(row.name)} · ${status}${summary ? ` — ${summary}` : ''}`, width);
-    lines.push(color('muted', line));
+
+const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+export const FRAME_MS = 150;
+const TERMINAL = ['failed', 'interrupted', 'cancelled', 'exited', 'error'];
+
+function glyph(state, now) {
+  if (['running', 'launching', 'uncertain'].includes(state)) return [SPIN[Math.floor(now / 120) % SPIN.length], 'accent'];
+  if (state === 'pending') return ['○', 'dim'];
+  if (TERMINAL.includes(state)) return ['●', 'error'];
+  return ['●', 'success'];
+}
+function elapsed(row, now = Date.now()) {
+  const start = Date.parse(row?.createdAt || '');
+  if (!start) return 0;
+  const end = row?.endedAt ? Date.parse(row.endedAt) : now;
+  return Math.max(0, Math.round((((end || now) - start)) / 1000));
+}
+function roleText(step) {
+  return plain(step.row?.role || step.agent || step.row?.name || '');
+}
+
+// A pipeline is a block of steps under one ◆ line; anything else is a loose row
+// with a blank gutter. Membership is the connector glyph, nothing else.
+export function buildGroups(rows, chains) {
+  const byChain = new Map(), loose = [];
+  for (const row of visibleRows(rows)) {
+    const id = row.chain?.id;
+    if (!id) { loose.push(row); continue; }
+    if (!byChain.has(id)) byChain.set(id, []);
+    byChain.get(id).push(row);
   }
-  if (active.length > 6) lines.push(color('dim', fit(t(language, 'more', { count: active.length - 6 }), width)));
-  lines.push(rule);
+  const groups = [];
+  for (const [id, chainRows] of byChain) {
+    const chain = chains?.get?.(id);
+    const running = !chain || chain.status === 'running';
+    const total = chain?.steps?.length || chainRows[0].chain?.total || chainRows.length;
+    const steps = [];
+    for (let index = 0; index < total; index++) {
+      const row = chainRows.find(candidate => candidate.chain?.index === index);
+      const record = chain?.steps?.[index];
+      if (!row && !(running && record)) continue;
+      steps.push({ index, row, agent: record?.agent, state: row?.taskState || record?.status || 'pending',
+        label: row?.label || record?.label || deriveLabel(row?.task || record?.task) });
+    }
+    const done = chain ? chain.steps.filter(step => step.status === 'completed').length
+      : steps.filter(step => step.state === 'completed').length;
+    if (!steps.length) continue;
+    groups.push({ id, title: plain(chain?.title || chainRows[0].chain?.title || 'pipeline'), done, total, steps });
+  }
+  return { groups, loose };
+}
+
+function roleColumn(groups, loose) {
+  const widths = [...groups.flatMap(group => group.steps), ...loose.map(row => ({ row }))]
+    .map(step => measure(roleText(step)));
+  return Math.min(12, Math.max(6, ...widths));
+}
+
+function chainLine(group, width, theme) {
+  const head = '   ', mark = '◆ ';
+  const rest = `${group.title} · ${group.done}/${group.total}`;
+  if (measure(head + mark + rest) <= width) return `${head}${softBlue(theme, mark)}${rest}`;
+  return fit(head + mark + rest, width);
+}
+
+function stepLine(step, { connector, last, roleWidth, width, theme, language, now }) {
+  const paint = (token, text) => theme?.fg ? theme.fg(token, text) : text;
+  const color = token => (text => paint(token, text));
+  const [symbol, token] = glyph(step.state, now);
+  const prefix = connector ? ['   ', last ? '└ ' : '├ '] : ['   ', ''];
+  const cell = roleText(step).padEnd(roleWidth + (connector ? 2 : 4));
+  const label = plain(step.label);
+  const segments = [
+    [prefix[0], color('dim')], [prefix[1], color('dim')], [symbol, color(token)], [' ', undefined],
+    [cell, color('muted')], [label, undefined],
+  ];
+  const stats = step.row ? statsText(elapsed(step.row, now), step.row.tokens) : statsBlank();
+  return alignRow(segments, stats, width);
+}
+
+// A widget is a couple of lines above the editor, not a task manager: past this
+// many rows the rest are behind /rex-tasks.
+export const MAX_ROWS = 10;
+
+export function overviewLines(rows, width, theme, language = 'en', chains) {
+  if (!width || width <= 0) return [];
+  const { groups, loose } = buildGroups(rows, chains);
+  if (!groups.length && !loose.length) return [];
+  const roleWidth = roleColumn(groups, loose);
+  const now = Date.now();
+  const dim = text => (theme?.fg ? theme.fg('dim', text) : text);
+  const lines = [];
+  let budget = MAX_ROWS, rendered = 0;
+  const push = line => { lines.push(line); budget--; };
+  for (const group of groups) {
+    if (budget <= 1) break;
+    push(chainLine(group, width, theme));
+    for (const [index, step] of group.steps.entries()) {
+      if (budget <= 1) break;
+      push(stepLine(step, { connector: true, last: index === group.steps.length - 1, roleWidth, width, theme, language, now }));
+      rendered++;
+    }
+  }
+  for (const row of loose) {
+    if (budget <= 1) break;
+    push(stepLine({ row, label: row.label, state: row.taskState }, { connector: false, roleWidth, width, theme, language, now }));
+    rendered++;
+  }
+  const total = groups.reduce((count, group) => count + group.steps.length, 0) + loose.length;
+  const hidden = total - rendered;
+  if (hidden > 0) lines.push(dim(fit(t(language, 'more', { count: hidden }), width)));
   return lines;
 }
-export function showOverview(ctx, rows, enabled, language = 'en') {
+
+export function showOverview(ctx, rows, enabled, language = 'en', chains) {
   if (!ctx?.hasUI) return;
-  ctx.ui.setWidget('rex-tasks', enabled && activeOverviewRows(rows).length ? (_tui, theme) => ({
-    render: width => overviewLines(rows, width, theme, language), invalidate() {},
-  }) : undefined, { placement: 'aboveEditor' });
+  if (!enabled || !visibleRows(rows).length) {
+    ctx.ui.setWidget('rex-tasks', undefined, { placement: 'aboveEditor' });
+    return;
+  }
+  ctx.ui.setWidget('rex-tasks', (tui, theme) => {
+    const component = {
+      render: width => overviewLines(rows, width, theme, language, chains),
+      invalidate() {},
+      dispose() { if (component.clock) clearInterval(component.clock); component.clock = undefined; },
+    };
+    // The spinner and the clocks tick, so the widget refreshes itself instead of
+    // waiting for unrelated TUI activity. unref keeps tests and scripts free to exit.
+    if (tui?.requestRender) {
+      component.clock = setInterval(() => { component.invalidate(); tui.requestRender(); }, FRAME_MS);
+      component.clock.unref?.();
+    }
+    return component;
+  }, { placement: 'aboveEditor' });
 }

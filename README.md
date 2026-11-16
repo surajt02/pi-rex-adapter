@@ -9,7 +9,7 @@ Send a code review to another Pi agent. Explore a side question beside your main
 - **Full Pi subagents.** Delegate work to interactive Pi sessions in dedicated tabs. Get results automatically, then step into a session whenever you want to continue the conversation.
 - **A conversation on the side.** `/btw` opens an independent Pi beside your main chat. Only the conclusions you choose to return enter the main conversation.
 - **Background jobs that report back.** `/bg` runs long shell commands, delivers their exit code and output, and closes the pane after delivery.
-- **A compact view of active work.** One line per task. Finished tasks leave the overview; history, logs, and controls stay available in a single overlay.
+- **A compact view of active work.** One line per agent: its goal in a few words, elapsed time, and token count. Pipelines group their steps under one heading. History, logs, and controls stay available in a single overlay.
 
 Built to stay out of the way: native Pi tools remain available, user-adjusted layouts are respected, and monitoring stops when no tasks need it. Configuration is just two settings: UI language and panes per tab.
 
@@ -143,9 +143,21 @@ Use this for commands you choose to start in the background. **The adapter does 
 
 ## Task overview and controls
 
-Above the parent's editor, the overview shows only running, starting, or unverified Agent and Shell tasks. Each occupies at most one line, with its type, name, state, and a task excerpt. BTW conversations are omitted. Completed, failed, interrupted, cancelled, and closed tasks disappear from the overview; when none remain, the overview disappears too. History is retained.
+Above the parent's editor, the list shows every Agent and Shell task whose pane is still open, so a completed agent awaiting review and a stuck or failed pane stay visible until you close them. BTW conversations live in their own split and never appear here. When nothing is open, the list disappears. History is retained.
 
-The display uses muted slate blue (`#7e98ad`), thin separators, and grey body text. At most six tasks appear; the task manager contains the rest. Terminal control characters are stripped and narrow panes truncate lines.
+Each step occupies one line:
+
+```
+   ◆ reload safety · 1/3
+   ├ ● scout       Read chain persistence            1m 07s · ↓  8.6k tokens
+   ├ ⠋ planner     Plan reload recovery              6m 12s · ↓ 12.4k tokens
+   └ ○ reviewer    Review plan vs code
+   ● worker        Write probe script                   41s · ↓  3.1k tokens
+```
+
+A pipeline is one block under its ◆ heading, with `done/total` steps and a step that has not launched yet shown as `○`. Agents outside a pipeline keep a blank gutter and start two columns left, because the connector glyph is what marks membership; their goal starts in the same column as a pipeline step's goal. State is carried by the glyph and its colour — spinner for running, filled for done, red for failed or interrupted, `○` for queued — never by a word. Each line ends with the elapsed time and the child's current token count, both right-aligned in fixed-width columns, so the figures line up and are never pushed off the line by a long goal. Time switches to `1h 42m` past an hour and clamps at `99h+`; token counts stay at most five characters (`8.6k`, `104k`, `1.0M`).
+
+Terminal width is respected: goals are truncated only when they genuinely cannot fit, and the figures keep their columns. Terminal control characters are stripped. At most ten rows appear; the task manager holds the rest.
 
 `/rex-tasks` is the single management entry point. It opens a native Pi overlay, up to 84 columns wide, with an opaque blue-grey background, border, padding, and a highlighted selection. Closing it restores the underlying page.
 
@@ -153,7 +165,7 @@ The display uses muted slate blue (`#7e98ad`), thin separators, and grey body te
 - Task menus contain details, logs, focus, interrupt, finish, and close actions. Returning from details or logs preserves the task menu; returning to the list preserves the selection and scroll position. Errors return to the same menu.
 - The first list entry toggles the main-page overview. This preference is saved per parent Pi session.
 - Closed tasks retain their results and logs. BTW conversations remain manageable here.
-- Completed, open agents show **Completed · awaiting delivery** or **Delivered · awaiting close**. Delivery requires a persisted parent-session receipt matching the latest turn; merely queuing a message or delivering an earlier turn does not count. Delivery does not confirm review. Task menus and details explain this distinction. These labels follow the UI language and refresh when you reopen or navigate the overlay, without extra timers or model wakeups. Completed tasks stay off the main-page overview.
+- Completed, open agents show **Completed · awaiting delivery** or **Delivered · awaiting close**. Delivery requires a persisted parent-session receipt matching the latest turn; merely queuing a message or delivering an earlier turn does not count. Delivery does not confirm review. Task menus and details explain this distinction. These labels follow the UI language and refresh when you reopen or navigate the overlay, without extra timers or model wakeups. A completed agent stays in the main-page list until its pane is closed, because closing it is what you do next.
 - An uncertain launch without a block ID does not offer unusable focus or close actions. After checking Rex and verifying that the resource is absent and the related process has stopped, use **Confirm resource removed…** to repair the record. This does not send a close or kill command. A connection failure alone is not evidence that a resource is gone.
 - Queries, details, and action errors stay in overlays. Creating a task gives brief status-bar feedback instead of a JSON dump in the main conversation.
 
@@ -165,8 +177,9 @@ The overview reflects the child's last reported activity. Opening it does not in
 
 | Tool | Parameters and behavior |
 | --- | --- |
-| `subagent` | `task`; optional `name,cwd,model,fork`. Starts an interactive Pi with automatic reports. |
+| `subagent` | `task,label`; optional `agent,name,cwd,model,fork`. Starts an interactive Pi with automatic reports. `label` is required and must be six words or fewer: it is the goal shown in the parent list. `agent` picks a role from `~/.pi/agent/agents/*.md`. |
 | `btw` | The same optional fields; omit `task` to focus, or supply a question to reuse the right-side conversation. Reports are explicit. |
+| `pipeline` | `steps[]` of `{agent,task,label,model}`, plus optional `title,cwd,model,fork`. Runs the steps in order, one pane each, and delivers one combined report. Every step needs a label of six words or fewer. |
 | `bg_run` | `command`; optional `name,cwd`. Starts a shell job with automatic completion delivery. |
 | `bg_logs` | `id`. Reads the last 16 KB of shell output. A missing log returns `logAvailable:false` and a note; agent/BTW results are available through `rex_tasks`. |
 | `bg_kill` | `id`. Closes an owned shell block. |

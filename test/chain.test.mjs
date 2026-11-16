@@ -113,12 +113,44 @@ test('the summary reports every step once, and points at a failure', async () =>
   assert.match(failed, /still open for inspection: run-2/);
 });
 
+test('a delegated agent must state its goal in six words, and the label is recorded for the list', async t => {
+  const client = fakeRex();
+  const h = await fixture(t, client);
+  const error = async params => JSON.parse((await h.call('subagent', params)).content[0].text).error;
+  assert.match(await error({ task: 'Review the change' }), /label is required/);
+  assert.match(await error({ task: 'Review the change', label: 'one two three four five six seven' }),
+    /label must be 6 words or fewer, got 7/);
+  assert.equal(client.calls.open.length, 0, 'a rejected label never opens a pane');
+
+  const started = await h.call('subagent', { task: 'Review the change', label: 'Review plan vs code', agent: 'scout' });
+  assert.equal(started.details.status, 'running');
+  const dir = join(h.root, started.details.id);
+  const run = JSON.parse(await readFile(join(dir, 'run.json'), 'utf8'));
+  assert.equal(run.label, 'Review plan vs code');
+  assert.equal(run.role, 'scout', 'the resolved role is part of the audit trail');
+});
+
+test('pipeline steps keep their labels in chain.json', async t => {
+  const client = fakeRex();
+  const h = await fixture(t, client);
+  const started = await h.call('pipeline', { title: 'auth', steps: [
+    { agent: 'scout', task: 'Map the auth module', label: 'Map auth module' },
+    { agent: 'worker', task: 'Add the missing test', label: 'Add missing test' },
+  ] });
+  const chains = await readdir(join(h.root));
+  const chainDir = chains.find(name => /^[0-9a-f-]{36}$/.test(name));
+  const chain = JSON.parse(await readFile(join(h.root, chainDir, 'chain.json'), 'utf8'));
+  assert.deepEqual(chain.steps.map(step => step.label), ['Map auth module', 'Add missing test']);
+  const run = JSON.parse(await readFile(join(h.root, started.details.first, 'run.json'), 'utf8'));
+  assert.equal(run.label, 'Map auth module');
+});
+
 test('a pipeline runs each role in its own pane and delivers one report', async t => {
   const client = fakeRex();
   const h = await fixture(t, client);
   const started = await h.call('pipeline', { title: 'auth', steps: [
-    { agent: 'scout', task: 'Map the auth module' },
-    { agent: 'worker', task: 'Add the missing test' },
+    { agent: 'scout', task: 'Map the auth module', label: 'Map the auth module' },
+    { agent: 'worker', task: 'Add the missing test', label: 'Add the missing test' },
   ] });
   assert.equal(started.details.status, 'running');
   assert.equal(started.details.steps.length, 2);
@@ -166,8 +198,8 @@ test('a failing step stops the chain, keeps its pane and reports where it stoppe
   const client = fakeRex();
   const h = await fixture(t, client);
   const started = await h.call('pipeline', { steps: [
-    { agent: 'scout', task: 'Map it' },
-    { agent: 'worker', task: 'Change it' },
+    { agent: 'scout', task: 'Map it', label: 'Map it' },
+    { agent: 'worker', task: 'Change it', label: 'Change it' },
   ] });
   await turn(join(h.root, started.details.first), 'could not find the module', 'failed');
   let message;
@@ -184,10 +216,13 @@ test('a pipeline rejects too many steps and unknown roles before launching anyth
   const client = fakeRex();
   const h = await fixture(t, client);
   const error = async params => JSON.parse((await h.call('pipeline', params)).content[0].text).error;
-  assert.match(await error({ steps: Array.from({ length: MAX_STEPS + 1 }, () => ({ task: 'x' })) }), new RegExp(`at most ${MAX_STEPS}`));
-  assert.match(await error({ steps: [{ agent: 'nobody', task: 'x' }] }), /Unknown agent role "nobody" in step 1/);
+  assert.match(await error({ steps: Array.from({ length: MAX_STEPS + 1 }, () => ({ task: 'x', label: 'x' })) }), new RegExp(`at most ${MAX_STEPS}`));
+  assert.match(await error({ steps: [{ agent: 'nobody', task: 'x', label: 'x' }] }), /Unknown agent role "nobody" in step 1/);
   assert.match(await error({ steps: [] }), /at least one step/);
   assert.match(await error({ steps: [{ agent: 'scout' }] }), /Step 1 needs a task/);
+  assert.match(await error({ steps: [{ agent: 'scout', task: 'x' }, { agent: 'worker', task: 'y' }] }), /Step 1: label is required/);
+  assert.match(await error({ steps: [{ agent: 'scout', task: 'x', label: 'Map it' },
+    { agent: 'worker', task: 'y', label: 'one two three four five six seven' }] }), /Step 2: label must be 6 words or fewer, got 7/);
   assert.equal(client.calls.open.length, 0, 'validation happens before any pane exists');
 });
 
@@ -195,8 +230,8 @@ test('a step whose pane closes without a report fails the chain instead of stall
   const client = fakeRex();
   const h = await fixture(t, client);
   const started = await h.call('pipeline', { steps: [
-    { agent: 'scout', task: 'Map it' },
-    { agent: 'worker', task: 'Change it' },
+    { agent: 'scout', task: 'Map it', label: 'Map it' },
+    { agent: 'worker', task: 'Change it', label: 'Change it' },
   ] });
   const dir = join(h.root, started.details.first);
   const run = JSON.parse(await readFile(join(dir, 'run.json'), 'utf8'));
@@ -217,7 +252,7 @@ test('a failed first launch leaves a terminal chain, not a running one', async t
   t.after(() => { if (saved[0] !== undefined) process.env.REX_SESSION = saved[0]; if (saved[1] !== undefined) process.env.REX_BLOCK = saved[1]; });
   const h = await fixture(t, client);
   const failed = await h.call('pipeline', { steps: [
-    { agent: 'scout', task: 'Map it' }, { agent: 'worker', task: 'Change it' }] });
+    { agent: 'scout', task: 'Map it', label: 'Map it' }, { agent: 'worker', task: 'Change it', label: 'Change it' }] });
   assert.match(failed.content[0].text, /Start Pi inside Rex/);
   assert.equal(failed.isError, true);
   const chains = await readdir(join(h.root)).catch(() => []);

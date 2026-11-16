@@ -24,7 +24,7 @@ export async function createChain(root, { title, task, steps, cwd, model, fork }
     id, title, task, cwd, model, fork,
     status: 'running', createdAt: new Date().toISOString(),
     steps: steps.map((step, index) => ({
-      index, agent: step.agent, task: step.task, model: step.model,
+      index, agent: step.agent, label: step.label, task: step.task, model: step.model,
       status: 'pending', runId: undefined, block: undefined, text: undefined, at: undefined,
     })),
   };

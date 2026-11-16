@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import adapter from '../src/index.mjs';
 import { prepareRun, atomicJson, readJson } from '../src/core.mjs';
-import { overviewLines, fit, orderRows, activeOverviewRows } from '../src/overview.mjs';
+import { overviewLines, fit, orderRows, activeOverviewRows, visibleRows, MAX_ROWS } from '../src/overview.mjs';
+import { measure } from '../src/columns.mjs';
 
 async function fixture(t, control) {
   const dir = await mkdtemp(join(tmpdir(), 'rex-overview-'));
@@ -64,7 +65,7 @@ test('main-page widget shows active agents and shell tasks only; can hide and re
   const lines = widget[1]().render(120).join('\n');
   for (const kind of ['agent', 'shell']) assert.match(lines, new RegExp(`${kind} delegated task`));
   assert.doesNotMatch(lines, /BTW|btw delegated|Pi idle|Closed/);
-  assert.equal(widget[1]().render(120).length, 5);
+  assert.equal(widget[1]().render(120).length, 2);
   driveOverlays(h.ctx, [['confirm'], ['cancel']]);
   await h.commands['rex-tasks'].handler('', h.ctx);
   assert.equal(h.widgets.at(-1)?.[1], undefined);
@@ -152,7 +153,8 @@ for (const language of ['en', 'zh']) test(`agent overlay uses durable latest-tur
   h.entries.push({ type: 'custom_message', customType: 'rex_result', details: { receipts: [`${run.id}/turn-second.json`] } });
   assert.match(await screen(), delivered);
   assert.equal(h.calls.length, 0); assert.equal(h.messages.length, 0);
-  assert.equal(h.widgets.at(-1)?.[1], undefined); // Completed tasks stay off the main overview.
+  // Completed but still open: visible, because the pane is what the reader inspects.
+  assert.equal(typeof h.widgets?.at(-1)?.[1], 'function');
 
   await atomicJson(join(run.dir, 'activity.json'), { task: 'running', process: 'running' });
   const running = await screen();
@@ -198,22 +200,79 @@ test('automatic shell close failure keeps the terminal and result; subsequent re
   await h.boundary();
   await until(() => attempts === 1);
   assert.equal((await readJson(join(run.dir, 'run.json'))).closed, undefined);
-  assert.equal(h.widgets.at(-1)?.[1], undefined); // Completed tasks live in the panel/history only.
+  assert.equal(typeof h.widgets.at(-1)?.[1], 'function'); // Open pane, so still listed.
   await until(async () => { await h.boundary(); return (await readJson(join(run.dir, 'run.json')))?.closed; });
   assert.equal(attempts, 2);
 });
 
 test('overview is bounded, prioritizes active tasks, and sanitizes terminal control input', () => {
-  const rows = Array.from({ length: 9 }, (_, i) => ({ id: `id-${i}`, name: `name-${i}`, kind: 'agent',
-    task: '\x1b[31m中文任务\nnext\x1b]0;title\x07', closed: false, taskState: 'running',
+  const rows = Array.from({ length: 12 }, (_, i) => ({ id: `id-${i}`, name: `name-${i}`, kind: 'agent',
+    label: 'Task ' + i, task: '\x1b[31m中文任务\nnext\x1b]0;title\x07', closed: false, taskState: 'running',
     processState: i === 8 ? 'running' : 'exited', createdAt: '2026-01-01T00:00:00Z' }));
-  assert.equal(orderRows(rows).length, 9);
-  const lines = overviewLines(rows, 30);
-  assert.equal(lines.length, 10);
+  assert.equal(orderRows(rows).length, 12);
+  const lines = overviewLines(rows, 40);
+  assert.equal(lines.length, MAX_ROWS);
   assert.ok(lines.every(line => !/[\x00-\x1f\x7f]/.test(line)));
-  assert.match(lines.at(-2), /3 more/);
+  assert.match(lines.at(-1), /3 more · \/rex-tasks for all/);
   assert.equal(fit('中文中文', 5), '中文…');
   assert.equal(fit('abc', 0), '');
+});
+
+const past = seconds => new Date(Date.now() - seconds * 1000).toISOString();
+function scenario() {
+  const chain = { id: 'chain-1' };
+  const rows = [
+    { id: 's1', kind: 'agent', name: 'scout 1/3 · reload safety', role: 'scout', label: 'Read chain persistence',
+      taskState: 'completed', createdAt: past(67), endedAt: past(0), tokens: 8600, closed: false, chain: { ...chain, index: 0, total: 3, title: 'reload safety' } },
+    { id: 's2', kind: 'agent', name: 'planner 2/3', role: 'planner', label: 'Plan reload recovery',
+      taskState: 'running', createdAt: past(372), tokens: 12400, closed: false, chain: { ...chain, index: 1, total: 3, title: 'reload safety' } },
+    { id: 'l1', kind: 'agent', name: 'researcher', role: 'researcher', label: 'Research reload semantics',
+      taskState: 'running', createdAt: past(161), tokens: 5200, closed: false },
+    { id: 'l2', kind: 'agent', name: 'probe-hang', role: 'worker', label: 'Write probe script',
+      taskState: 'interrupted', createdAt: past(41), endedAt: past(0), tokens: 3100, closed: false },
+  ];
+  const chains = new Map([['chain-1', { id: 'chain-1', title: 'reload safety', status: 'running', steps: [
+    { index: 0, agent: 'scout', label: 'Read chain persistence', status: 'completed', runId: 's1' },
+    { index: 1, agent: 'planner', label: 'Plan reload recovery', status: 'running', runId: 's2' },
+    { index: 2, agent: 'reviewer', label: 'Review plan vs code', status: 'pending' }] }]]);
+  return { rows, chains };
+}
+
+test('a pipeline renders as one ◆ block of ├/└ steps; loose rows keep a blank gutter', () => {
+  const { rows, chains } = scenario();
+  const lines = overviewLines(rows, 126, undefined, 'en', chains);
+  assert.match(lines[0], /^   ◆ reload safety · 1\/3$/);
+  assert.match(lines[1], /^   ├ ● scout /);
+  assert.match(lines[2], /^   ├ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] planner /);
+  assert.match(lines[3], /^   └ ○ reviewer /);      // a not-yet-launched step still shows
+  assert.match(lines[4], /^   [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] researcher /);
+  assert.match(lines[5], /^   ● worker /);
+  assert.equal(lines.length, 6);
+});
+
+test('label column is shared by grouped and loose rows while the stats stay flush right', () => {
+  const { rows, chains } = scenario();
+  for (const width of [126, 80, 62]) {
+    const lines = overviewLines(rows, width, undefined, 'en', chains);
+    for (const line of lines.slice(1)) assert.equal(measure(line), width, `width ${width}: ${line}`);
+    assert.ok(measure(lines[0]) <= width);
+    const labelled = lines.slice(1).filter(line => !/○ reviewer/.test(line));
+    const offsets = labelled.map(line => measure(line.slice(0, line.search(/Read chain|Plan reload|Research reload|Write probe/))));
+    assert.deepEqual(new Set(offsets).size, 1, `label offsets differ: ${offsets}`);
+    const arrows = lines.slice(1).filter(line => line.includes('↓')).map(line => measure(line.slice(0, line.indexOf('↓'))));
+    assert.equal(new Set(arrows).size, 1, `stats columns differ: ${arrows}`);
+    const tokenEnds = lines.slice(1).filter(line => line.includes('tokens')).map(line => line.length);
+    assert.equal(new Set(tokenEnds).size, 1);
+  }
+});
+
+test('alignment survives colour, the defect that made a red row slide one column left', () => {
+  const { rows, chains } = scenario();
+  const theme = { fg: (token, text) => `\x1b[38;5;${token === 'error' ? '167m' : '35m'}${text}\x1b[0m` };
+  const lines = overviewLines(rows, 90, theme, 'en', chains);
+  for (const line of lines.slice(1)) assert.equal(measure(line), 90);
+  const arrows = lines.slice(1).filter(line => line.includes('↓')).map(line => measure(line.slice(0, line.indexOf('↓'))));
+  assert.equal(new Set(arrows).size, 1);
 });
 
 test('panel maps selected task to owned full ID and rejects actions after session switch', async t => {
@@ -227,22 +286,32 @@ test('panel maps selected task to owned full ID and rejects actions after sessio
 });
 
 
-test('completed, failed, interrupted, cancelled, closed and BTW tasks are hidden; history is unchanged', () => {
+test('an open pane stays listed whatever its state; closed panes and BTW never are', () => {
   const rows = ['completed', 'failed', 'interrupted', 'cancelled', 'exited'].map((taskState, i) => ({
-    id: `${i}`, kind: 'agent', taskState, closed: false,
+    id: `${i}`, kind: 'agent', taskState, closed: false, label: `Task ${i}`, createdAt: past(i),
   }));
   rows.push({ id: 'btw', kind: 'btw', taskState: 'running' }, { id: 'closed', kind: 'shell', taskState: 'running', closed: true });
+  // Only running work counts as active for the status line...
   assert.deepEqual(activeOverviewRows(rows), []);
-  assert.deepEqual(overviewLines(rows, 80), []);
-  assert.equal(rows.length, 7);
+  // ...but the list is the set of panes still open for inspection.
+  assert.deepEqual(visibleRows(rows).map(row => row.id).sort(), ['0', '1', '2', '3', '4']);
+  assert.equal(visibleRows(rows)[0].id, '1'); // a failed pane outranks completed ones
+  assert.equal(overviewLines(rows, 80).length, 5);
+  assert.deepEqual(visibleRows([rows[5]]), []);
+  assert.deepEqual(overviewLines([rows[5]], 80), []);
 });
 
-test('widget disappears as the last running task completes without deleting panel history', async t => {
+test('widget survives completion and disappears only when the pane closes', async t => {
   const h = await fixture(t), run = await task(h.root, 'agent', 'running');
   await h.events.session_start({}, h.ctx); await h.boundary();
   assert.equal(typeof h.widgets.at(-1)[1], 'function');
   await atomicJson(join(run.dir, 'result.json'), { text: 'done', status: 'completed' });
   await atomicJson(join(run.dir, 'activity.json'), { task: 'completed', process: 'idle' });
+  await h.boundary();
+  // Completed but still open: it is exactly what the reader must be able to finish.
+  assert.equal(typeof h.widgets.at(-1)[1], 'function');
+  assert.match(h.widgets.at(-1)[1]().render(80).join('\n'), /agent-test/);
+  await h.tools.rex_finish.execute('x', { id: run.id }, undefined, undefined, h.ctx);
   await h.boundary();
   await until(() => h.widgets.at(-1)[1] === undefined);
   const history = await h.tools.rex_tasks.execute('x', {}, undefined, undefined, h.ctx);
@@ -250,17 +319,16 @@ test('widget disappears as the last running task completes without deleting pane
   assert.equal(history.details[0].taskState, 'completed');
 });
 
-test('compact theme uses desaturated blue title/rules and muted one-line task text', () => {
+test('theme paints the chain marker slate blue, roles muted and stats dim, with no rules or heading', () => {
   const tokens = [];
-  const theme = { fg: (token, text) => { tokens.push(token); return text; }, style: (text, options) => { tokens.push(options.fg); return text; } };
-  const rows = [{ id: 'a', kind: 'agent', taskState: 'running', name: 'review', task: 'Review the change' }];
-  const lines = overviewLines(rows, 80, theme);
-  assert.equal(lines.length, 4);
-  assert.equal(lines[0], '─'.repeat(80));
-  assert.equal(lines.at(-1), lines[0]);
-  assert.match(lines[2], /review.*Review the change/);
+  const theme = { fg: (token, text) => { tokens.push(token); return `<${{}}${token}>${text}`; }, style: (text, options) => { tokens.push(options.fg); return text; } };
+  const { rows, chains } = scenario();
+  const lines = overviewLines(rows, 80, theme, 'en', chains);
+  assert.doesNotMatch(lines.join(''), /Rex Tasks|─{10}/);
+  assert.match(lines[0], /◆ reload safety/);
   assert.ok(tokens.some(token => token?.kind === 'rgb' && token.r === 126 && token.g === 152 && token.b === 173));
-  assert.ok(!tokens.includes('warning')); assert.ok(tokens.includes('muted'));
+  assert.ok(tokens.includes('muted')); assert.ok(tokens.includes('dim')); assert.ok(tokens.includes('accent'));
+  assert.ok(tokens.includes('success')); assert.ok(!tokens.includes('warning'));
 });
 
 test('task list and details stay in overlays, with no notification or transcript dump', async t => {

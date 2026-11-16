@@ -224,7 +224,7 @@ test('unknown task exposes recovery instead of impossible controls; only explici
   overlays(h, [['down', 'confirm'], ['down', 'confirm'], ['down', 'confirm'], ['cancel']]);
   await h.commands['rex-tasks'].handler('', h.ctx);
   assert.equal((await readJson(join(run.dir, 'run.json'))).closed, true);
-  const result = await h.call('subagent', { task: 'new review' });
+  const result = await h.call('subagent', { task: 'new review', label: 'Review the change' });
   assert.equal(result.isError, undefined); assert.equal(opens, 1);
 });
 
