@@ -1,0 +1,192 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import adapter from '../src/index.mjs';
+import { atomicJson } from '../src/core.mjs';
+import { composeTask, chainSummary, createChain, MAX_STEPS } from '../src/chain.mjs';
+
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function until(condition, label = 'condition') {
+  for (let i = 0; i < 400; i++) { if (await condition()) return; await delay(10); }
+  assert.fail(`Timed out waiting for ${label}`);
+}
+
+function fakeRex() {
+  const calls = { open: [], control: [], inspect: [] };
+  let blocks = 0;
+  return { calls,
+    async open(run) {
+      calls.open.push({ name: run.name, task: run.task, model: run.model, thinking: run.thinking, chain: run.chain, role: run.role, tools: run.tools });
+      const id = `block-${++blocks}`;
+      run.window = run.layout.mode === 'window' ? `window-${blocks}` : run.layout.window;
+      return id;
+    },
+    async inspect(run) { calls.inspect.push(run.block); return { window: `window-${blocks}` }; },
+    async control(run, action) { calls.control.push({ id: run.id, action }); },
+    events() { return () => {}; },
+  };
+}
+
+async function fixture(t, client) {
+  const dir = await mkdtemp(join(tmpdir(), 'rex-chain-'));
+  const agentDir = join(dir, 'agent');
+  await mkdir(join(agentDir, 'agents'), { recursive: true });
+  await writeFile(join(agentDir, 'agents', 'scout.md'),
+    '---\ndescription: maps code\nmodel: opencode-go/scout-model\nthinking: low\ntools: read,grep\n---\nYou are a scout.\n');
+  await writeFile(join(agentDir, 'agents', 'worker.md'),
+    '---\ndescription: writes code\nmodel: opencode-go/worker-model\nthinking: high\ntools: read,edit\n---\nYou are a worker.\n');
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  const root = join(dir, 'rex-adapter', 'parent');
+  const events = {}, tools = {}, entries = [], messages = [];
+  const ctx = { cwd: dir, hasUI: false, isIdle: () => false, sessionManager: {
+    getSessionDir: () => dir, getSessionId: () => 'parent', getEntries: () => entries, getBranch: () => entries,
+  }, ui: { setWidget() {}, setStatus() {}, notify() {} } };
+  const pi = { on: (name, fn) => { events[name] = fn; }, registerTool: tool => { tools[tool.name] = tool; },
+    registerCommand() {}, getThinkingLevel: () => 'off', appendEntry() {},
+    sendMessage: message => { messages.push(message); entries.push({ type: 'custom_message', ...message }); } };
+  adapter(pi, { rex: client });
+  t.after(async () => {
+    events.session_shutdown();
+    await delay(20);
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
+    await rm(dir, { recursive: true, force: true });
+  });
+  const call = (name, params) => tools[name].execute('call', params, undefined, undefined, ctx);
+  const boundary = () => events.turn_end({ entries: [], context: { canContinue: true }, outcome: 'completed' }, ctx);
+  await events.session_start({}, ctx);
+  return { dir, root, tools, entries, messages, ctx, call, boundary };
+}
+
+// Mirrors what the child extension writes after a settled turn.
+async function turn(dir, text, status = 'completed') {
+  const result = { text, status, sequence: Date.now(), createdAt: new Date().toISOString() };
+  await atomicJson(join(dir, 'result.json'), result);
+  await atomicJson(join(dir, 'activity.json'), { task: status, process: 'idle', at: new Date().toISOString() });
+  await atomicJson(join(dir, `turn-${Date.now()}.json`), result);
+}
+
+test('step one receives only its own task', async t => {
+  const chain = await createChain(await mkdtemp(join(tmpdir(), 'rex-compose-')), {
+    title: 'x', task: 'map it', steps: [{ agent: 'scout', task: 'map it' }, { agent: 'worker', task: 'fix it' }],
+  });
+  const first = composeTask(chain, 0);
+  assert.match(first, /^Complete step 1 of 2 in a pipeline/);
+  assert.match(first, /# Task\n\nmap it/);
+  assert.doesNotMatch(first, /Overall task/);
+  t.diagnostic(first);
+});
+
+test('a later step receives the overall task, the previous report and its own task', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'rex-compose-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const chain = await createChain(root, {
+    title: 'x', task: 'map it', steps: [{ agent: 'scout', task: 'map it' }, { agent: 'worker', task: 'fix it' }],
+  });
+  chain.steps[0].text = 'auth lives in src/auth.ts';
+  const second = composeTask(chain, 1);
+  assert.match(second, /# Overall task\n\nmap it/);
+  assert.match(second, /# Report from step 1 \(scout\)\n\nauth lives in src\/auth\.ts/);
+  assert.match(second, /# Your step\n\nfix it/);
+  assert.match(second, /Do not delegate further/);
+});
+
+test('the summary reports every step once, and points at a failure', async () => {
+  const chain = { id: 'chain-1', title: 'auth', status: 'completed', steps: [
+    { index: 0, agent: 'scout', status: 'completed', runId: 'run-1', text: 'mapped the module' },
+    { index: 1, agent: 'worker', status: 'completed', runId: 'run-2', text: 'added the test' },
+  ] };
+  const summary = chainSummary(chain, { artifacts: '/tmp/chain-1' });
+  assert.match(summary, /Rex pipeline auth \(chain-1\): completed; steps=2/);
+  assert.match(summary, /Step 1\/2 scout: completed \(run-1\) — mapped the module/);
+  assert.match(summary, /Final report \(worker\):\nadded the test/);
+  assert.match(summary, /Artifacts: \/tmp\/chain-1/);
+  assert.doesNotMatch(summary, /rex_finish/);
+
+  chain.status = 'failed';
+  chain.steps[1].status = 'failed';
+  chain.steps[1].error = 'turn failed';
+  const failed = chainSummary(chain, { artifacts: '/tmp/chain-1' });
+  assert.match(failed, /Failing step report \(worker\)/);
+  assert.match(failed, /still open for inspection: run-2/);
+});
+
+test('a pipeline runs each role in its own pane and delivers one report', async t => {
+  const client = fakeRex();
+  const h = await fixture(t, client);
+  const started = await h.call('pipeline', { title: 'auth', steps: [
+    { agent: 'scout', task: 'Map the auth module' },
+    { agent: 'worker', task: 'Add the missing test' },
+  ] });
+  assert.equal(started.details.status, 'running');
+  assert.equal(started.details.steps.length, 2);
+  assert.equal(client.calls.open.length, 1);
+  const first = client.calls.open[0];
+  assert.equal(first.chain.index, 0);
+  assert.equal(first.chain.total, 2);
+  assert.equal(first.role, 'scout');
+  assert.equal(first.model, 'opencode-go/scout-model', 'the role pins the model');
+  assert.equal(first.thinking, 'low');
+  assert.equal(first.tools, 'read,grep');
+  assert.match(first.task, /^Complete step 1 of 2/);
+
+  await turn(join(h.root, started.details.first), 'auth lives in src/auth.ts');
+  assert.equal(h.boundary(), undefined, 'an intermediate step reports nothing to the parent');
+  await until(() => client.calls.open.length === 2, 'the second step to launch');
+  const second = client.calls.open[1];
+  assert.equal(second.chain.index, 1);
+  assert.equal(second.role, 'worker');
+  assert.equal(second.model, 'opencode-go/worker-model');
+  assert.match(second.task, /# Overall task\n\nMap the auth module/);
+  assert.match(second.task, /# Report from step 1 \(scout\)\n\nauth lives in src\/auth\.ts/);
+  assert.match(second.task, /# Your step\n\nAdd the missing test/);
+
+  const rows = (await h.call('rex_tasks', {})).details;
+  assert.equal(rows.length, 2, 'both steps are tracked while the chain runs');
+  const worker = rows.find(row => String(row.name).startsWith('worker'));
+  assert.ok(worker, 'the second step is tracked as the worker step');
+  await turn(join(h.root, worker.id), 'test added, suite green');
+
+  let message;
+  await until(() => { const value = h.boundary(); if (value) message = value.entries.at(-1); return Boolean(value); }, 'the combined report');
+  assert.match(message.content, /Rex pipeline auth \(.*\): completed; steps=2/);
+  assert.match(message.content, /Final report \(worker\):\ntest added, suite green/);
+  assert.equal(message.details.receipts.length, 1, 'one message for the whole chain');
+  // `finish` validates the handoff and then closes the block, so Rex sees a close.
+  await until(() => client.calls.control.length === 2, 'completed panes to close');
+  assert.deepEqual(client.calls.control.map(call => call.action), ['close', 'close']);
+  // Closed tasks stay in history; they must report terminal states, not linger as running.
+  await until(async () => (await h.call('rex_tasks', {})).details
+    .every(row => row.taskState === 'completed' && row.blockState === 'closed'), 'both steps to close');
+});
+
+test('a failing step stops the chain, keeps its pane and reports where it stopped', async t => {
+  const client = fakeRex();
+  const h = await fixture(t, client);
+  const started = await h.call('pipeline', { steps: [
+    { agent: 'scout', task: 'Map it' },
+    { agent: 'worker', task: 'Change it' },
+  ] });
+  await turn(join(h.root, started.details.first), 'could not find the module', 'failed');
+  let message;
+  await until(() => { const value = h.boundary(); if (value) message = value.entries.at(-1); return Boolean(value); }, 'the failed chain report');
+  assert.match(message.content, /Rex pipeline .*: failed/);
+  assert.match(message.content, /Failing step report \(scout\)/);
+  assert.match(message.content, /could not find the module/);
+  assert.match(message.content, /still open for inspection/);
+  assert.equal(client.calls.open.length, 1, 'no later step is launched after a failure');
+  assert.equal(client.calls.control.length, 0, 'the failing pane stays open');
+});
+
+test('a pipeline rejects too many steps and unknown roles before launching anything', async t => {
+  const client = fakeRex();
+  const h = await fixture(t, client);
+  const error = async params => JSON.parse((await h.call('pipeline', params)).content[0].text).error;
+  assert.match(await error({ steps: Array.from({ length: MAX_STEPS + 1 }, () => ({ task: 'x' })) }), new RegExp(`at most ${MAX_STEPS}`));
+  assert.match(await error({ steps: [{ agent: 'nobody', task: 'x' }] }), /Unknown agent role "nobody" in step 1/);
+  assert.match(await error({ steps: [] }), /at least one step/);
+  assert.match(await error({ steps: [{ agent: 'scout' }] }), /Step 1 needs a task/);
+  assert.equal(client.calls.open.length, 0, 'validation happens before any pane exists');
+});
