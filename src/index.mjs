@@ -153,18 +153,20 @@ export default function adapter(pi, dependencies = {}) {
       const print = fingerprint(snapshot.agents);
       if (print === entry.print) continue;
       entry.print = print; entry.snapshot = snapshot;
-      for (const invalidate of entry.invalidators) invalidate();
+      // One invalidator per slot: Pi hands a fresh closure to every render, so a
+      // set of them would grow with every repaint.
+      for (const invalidate of entry.invalidators.values()) invalidate();
     }
   }
   function rememberTool(id, entry) {
     if (!id) return;
-    transcriptRows.set(id, { ...entry, invalidators: new Set(), print: undefined, snapshot: undefined });
+    transcriptRows.set(id, { ...entry, invalidators: new Map(), print: undefined, snapshot: undefined });
     refreshTranscript();
   }
-  function trackRenderer(context) {
+  function trackRenderer(context, slot) {
     const entry = transcriptRows.get(context?.toolCallId);
     if (!entry) return undefined;
-    if (typeof context.invalidate === 'function') entry.invalidators.add(context.invalidate);
+    if (typeof context.invalidate === 'function') entry.invalidators.set(slot, context.invalidate);
     return entry;
   }
   function configureControls(hasTasks) {
@@ -826,12 +828,12 @@ export default function adapter(pi, dependencies = {}) {
   function agentRenderers() {
     return {
       renderCall(args, theme, context) {
-        const entry = trackRenderer(context);
+        const entry = trackRenderer(context, 'call');
         return component(() => agentHeader((entry?.snapshot?.agents || [argsAgent(args, 'agent')])[0],
           { hint: expandHint(context, context?.expanded) }), paintWith(theme));
       },
       renderResult(result, options, theme, context) {
-        const entry = trackRenderer(context);
+        const entry = trackRenderer(context, 'result');
         return component(width => {
           const agent = entry?.snapshot?.agents?.[0] || argsAgent(context?.args);
           const failure = result?.details?.error;
@@ -844,7 +846,7 @@ export default function adapter(pi, dependencies = {}) {
   function pipelineRenderers() {
     return {
       renderCall(args, theme, context) {
-        const entry = trackRenderer(context);
+        const entry = trackRenderer(context, 'call');
         return component(() => {
           const snapshot = entry?.snapshot;
           const hint = expandHint(context, context?.expanded);
@@ -853,7 +855,7 @@ export default function adapter(pi, dependencies = {}) {
         }, paintWith(theme));
       },
       renderResult(result, options, theme, context) {
-        const entry = trackRenderer(context);
+        const entry = trackRenderer(context, 'result');
         return component(width => {
           const failure = result?.details?.error;
           if (failure) return [[['⎿ ', 'dim'], [String(failure), 'error']]];
