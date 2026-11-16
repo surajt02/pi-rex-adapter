@@ -60,12 +60,15 @@ export function softBlue(theme, text) {
     : theme?.fg ? theme.fg('muted', text) : text;
 }
 
-const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-export const FRAME_MS = 150;
+// The rest of this Pi UI spins one dot cycle (pi-claude-code-ui / OpenBrawd),
+// so the list must not animate in a second visual language. The ping-pong
+// order is theirs too: the ends and the middle glyph hold for two frames.
+const SPIN = ['·', '✢', '✳', '✶', '✻', '✽', '✽', '✻', '✶', '✳', '✢', '·'];
+export const FRAME_MS = 170;
 const TERMINAL = ['failed', 'interrupted', 'cancelled', 'exited', 'error'];
 
 function glyph(state, now) {
-  if (['running', 'launching', 'uncertain'].includes(state)) return [SPIN[Math.floor(now / 120) % SPIN.length], 'accent'];
+  if (['running', 'launching', 'uncertain'].includes(state)) return [SPIN[Math.floor(now / FRAME_MS) % SPIN.length], 'accent'];
   if (state === 'pending') return ['○', 'dim'];
   if (TERMINAL.includes(state)) return ['●', 'error'];
   return ['●', 'success'];

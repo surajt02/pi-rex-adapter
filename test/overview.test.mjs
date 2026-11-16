@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import adapter from '../src/index.mjs';
 import { prepareRun, atomicJson, readJson } from '../src/core.mjs';
-import { overviewLines, fit, orderRows, activeOverviewRows, visibleRows, MAX_ROWS } from '../src/overview.mjs';
+import { overviewLines, fit, orderRows, activeOverviewRows, visibleRows, MAX_ROWS, FRAME_MS } from '../src/overview.mjs';
 import { measure } from '../src/columns.mjs';
 
 async function fixture(t, control) {
@@ -243,11 +243,29 @@ test('a pipeline renders as one ◆ block of ├/└ steps; loose rows keep a bl
   const lines = overviewLines(rows, 126, undefined, 'en', chains);
   assert.match(lines[0], /^   ◆ reload safety · 1\/3$/);
   assert.match(lines[1], /^   ├ ● scout /);
-  assert.match(lines[2], /^   ├ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] planner /);
+  assert.match(lines[2], /^   ├ [·✢✳✶✻✽] planner /);
   assert.match(lines[3], /^   └ ○ reviewer /);      // a not-yet-launched step still shows
-  assert.match(lines[4], /^   [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] researcher /);
+  assert.match(lines[4], /^   [·✢✳✶✻✽] researcher /);
   assert.match(lines[5], /^   ● worker /);
   assert.equal(lines.length, 6);
+});
+
+test('the running glyph is the same dot cycle the rest of the UI spins', () => {
+  const frames = ['·', '✢', '✳', '✶', '✻', '✽', '✽', '✻', '✶', '✳', '✢', '·'];
+  const row = { id: 'a', kind: 'agent', role: 'scout', label: 'Read chain persistence', taskState: 'running',
+    createdAt: past(9), closed: false };
+  // Align the clock to a cycle boundary so frame 0 is really the first frame.
+  const real = Date.now, cycle = FRAME_MS * frames.length, base = Math.floor(1_000_000 / cycle) * cycle;
+  try {
+    const seen = frames.map((expected, index) => {
+      Date.now = () => base + index * FRAME_MS;
+      const line = overviewLines([row], 60);
+      assert.equal(line[0].slice(3, 4), expected, `frame ${index}`);
+      return expected;
+    });
+    assert.equal(new Set(seen).size, 6, 'the cycle passes through six glyphs, not ten braille frames');
+  } finally { Date.now = real; }
+  assert.equal(FRAME_MS, 170, 'cadence matches the UI spinner, so both tick together');
 });
 
 test('label column is shared by grouped and loose rows while the stats stay flush right', () => {

@@ -108,7 +108,7 @@ BTW 回传是可选操作：普通回答结束后提示“答案已就绪 · 可
 ```
    ◆ reload safety · 1/3
    ├ ● scout       Read chain persistence            1m 07s · ↓  8.6k tokens
-   ├ ⠋ planner     Plan reload recovery              6m 12s · ↓ 12.4k tokens
+   ├ ✳ planner     Plan reload recovery              6m 12s · ↓ 12.4k tokens
    └ ○ reviewer    Review plan vs code
    ● worker        Write probe script                   41s · ↓  3.1k tokens
 ```
