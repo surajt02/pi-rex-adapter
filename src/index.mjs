@@ -6,6 +6,7 @@ import { Rex, rexExecutable, atomicJson, readJson, listRuns, prepareRun,
   contextSnapshot, tailFile, runStatus, runStates } from './core.mjs';
 
 import { withLayoutLock, existingBtw, choosePlacement } from './layout.mjs';
+import { discoverRoles, findRole, applyRole, roleSummary } from './roles.mjs';
 import { registerChild } from './child.mjs';
 import { directRun, observeLifecycles } from './lifecycle.mjs';
 import { createDialogs } from './dialog.mjs';
@@ -313,18 +314,25 @@ export default function adapter(pi, dependencies = {}) {
         if (reused) { if (epoch === generation) { tracked.set(reused.id, reused.artifacts); monitor(); void reconcile(); } return reused; }
       }
       if (!task) throw new Error('Task must not be empty; use /btw <question> to start a side conversation.');
-      const options = {
-        owner: ctx.sessionManager.getSessionId(), kind, name, task, cwd: resolve(ctx.cwd, params.cwd || '.'),
+      const roles = params.agent ? discoverRoles(ctx.cwd) : undefined;
+      const role = roles ? findRole(roles, params.agent) : undefined;
+      if (params.agent && !role) {
+        throw new Error(`Unknown agent role "${params.agent}". Available: ${[...roles.keys()].join(', ') || 'none'}.`);
+      }
+      const options = applyRole(role, {
+        owner: ctx.sessionManager.getSessionId(), kind, name, task, cwd: resolve(ctx.cwd, params.cwd || role?.cwd || '.'),
         runtime: kind === 'shell' ? 'shell-runner' : 'direct-pi',
         rexSession: process.env.REX_SESSION, anchor: process.env.REX_BLOCK,
         piBin: process.env.PI_REX_PI_BIN || process.argv[1] || 'pi',
         path: process.env.PATH,
         model: params.model || (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined),
         thinking: pi.getThinkingLevel(), configCwd: ctx.cwd,
-      };
+      }, params);
       options.layout = await choosePlacement(launchRoot, client, options, signal, config.panesPerTab);
       signal.throwIfAborted();
-      const run = await prepareRun(launchRoot, options, kind === 'shell' || params.fork === false ? '' : contextSnapshot(ctx.sessionManager.getBranch()));
+      const snapshot = kind === 'shell' || params.fork === false || role?.fork === false
+        ? '' : contextSnapshot(ctx.sessionManager.getBranch());
+      const run = await prepareRun(launchRoot, options, snapshot);
       let requested = false;
       try {
         signal.throwIfAborted();
@@ -595,7 +603,9 @@ export default function adapter(pi, dependencies = {}) {
   command('bg', 'Run a shell command in a background Rex block; report completion automatically', (task, ctx) => launch('shell', { task }, ctx));
   command('rex-agent', 'Delegate a task to a Pi process in a background Rex tab', (task, ctx) => launch('agent', { task }, ctx));
   const fields = { task: string, name: string, cwd: string, model: string, fork: { type: 'boolean' } };
-  tool('subagent', 'Launch a bounded task in a persistent interactive Pi terminal in a Rex tab. Result arrives automatically; do not poll. Review the handoff, then promptly call rex_finish unless another agent turn is needed; retained files remain usable for integration and testing. Use separate checkouts for parallel writers.', schema(fields, ['task']), (p, ctx, signal) => launch('agent', p, ctx, signal));
+  const agentFields = { ...fields, agent: string };
+  const roleHint = roleSummary(discoverRoles(process.cwd()));
+  tool('subagent', `Launch a bounded task in a persistent interactive Pi terminal in a Rex tab. Optional agent picks a role, which supplies its own model, thinking, tools and instructions${roleHint ? `: ${roleHint}` : ''}. Result arrives automatically; do not poll. Review the handoff, then promptly call rex_finish unless another agent turn is needed; retained files remain usable for integration and testing. Use separate checkouts for parallel writers.`, schema(agentFields, ['task']), (p, ctx, signal) => launch('agent', p, ctx, signal));
   tool('btw', 'Reuse the parent side conversation, or create it on the right. Supply task to queue a question; omit task to focus. Only /btw-return sends conclusions back.', schema(fields), (p, ctx, signal) => launch('btw', p, ctx, signal));
   tool('bg_run', 'Run a long shell command in a background Rex block. Use for builds/tests/servers that should not block the main task. Completion reports exit code and output automatically; do not poll.', schema({ command: string, name: string, cwd: string }, ['command']), (p, ctx, signal) => launch('shell', { ...p, task: p.command }, ctx, signal));
   tool('rex_finish', 'Promptly close a completed agent/shell block after reviewing its handoff unless further interaction is needed. Files, results and session records remain available for parent integration/testing; do not wait for the overall parent task to end. Requires a completed task and an idle or exited process; rejects BTW and active/failed tasks.', schema({ id: string }, ['id']), (p, _ctx, signal) => control(p.id, 'finish', signal));

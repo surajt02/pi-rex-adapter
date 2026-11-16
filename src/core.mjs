@@ -157,6 +157,8 @@ export async function prepareRun(root, options, context) {
     `Current task:\n${options.task}`,
   ].filter(Boolean).join('\n\n');
   await writeFile(join(dir, 'prompt.md'), prompt, { mode: 0o600 });
+  // A role's instructions belong in the system prompt, not in the task text.
+  if (run.agentPrompt) await writeFile(join(dir, 'agent.md'), `${run.agentPrompt}\n`, { mode: 0o600 });
   return run;
 }
 export function piArgs(run, extension) {
@@ -166,6 +168,10 @@ export function piArgs(run, extension) {
   if (run.kind === 'agent') args.push('--approve');
   if (run.model) args.push('--model', run.model);
   if (run.thinking) args.push('--thinking', run.thinking);
+  if (run.tools) args.push('--tools', run.tools);
+  if (run.denyTools) args.push('--exclude-tools', run.denyTools);
+  for (const skill of run.skills || []) args.push('--skill', skill);
+  if (run.agentPrompt) args.push('--append-system-prompt', join(run.dir, 'agent.md'));
   if (run.kind === 'btw') args.push('--tools', 'read,grep,find,ls', '--no-mcp');
   args.push('--', `@${join(run.dir, 'prompt.md')}`);
   return args;
