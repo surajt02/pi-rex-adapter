@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { choosePlacement, existingBtw, withLayoutLock, applyChip } from '../src/layout.mjs';
+import { choosePlacement, existingBtw, btwPanes, reuseBtw, withLayoutLock, applyChip } from '../src/layout.mjs';
 import { Rex, prepareRun, atomicJson, readJson, runStates, listRuns } from '../src/core.mjs';
 import { registerChild } from '../src/child.mjs';
 import adapter from '../src/index.mjs';
@@ -215,6 +215,11 @@ test('BTW reuses the same session, queues literal questions, focuses on bare inv
   assert.equal(reused.id, run.id); assert.equal(reused.reused, true);
   const input = await readJson(join(run.dir, `input-${reused.request}.json`));
   assert.equal(input.text, '/literal $(not a command)');
+  // A composed question is delivered text only; the stored task stays raw.
+  const composed = await existingBtw(root, client, { rexSession: 'rex', task: 'q', message: 'pre\n\nq\n\npost' });
+  const composedInput = await readJson(join(run.dir, `input-${composed.request}.json`));
+  assert.equal(composedInput.text, 'pre\n\nq\n\npost');
+  assert.equal((await readJson(join(run.dir, 'run.json'))).task, 'task');
   await existingBtw(root, client, { rexSession: 'rex' });
   assert.equal(client.calls.at(-1).action, 'focus');
   await assert.rejects(existingBtw(root, client, { rexSession: 'rex', task: 'different', cwd: '/different' }), /another cwd/);
@@ -225,6 +230,62 @@ test('BTW reuses the same session, queues literal questions, focuses on bare inv
   const replacement = await create(root, client, 'btw');
   assert.notEqual(replacement.id, run.id);
   assert.equal(replacement.layout.anchor, 'parent');
+});
+
+test('side conversations are listed newest first, with closed and vanished panes left out', async t => {
+  const root = await temp(t), client = fakeRex();
+  const older = await create(root, client, 'btw'), newer = await create(root, client, 'btw');
+  // Creation timestamps can collide inside one millisecond; the picker's order
+  // has to be this one, so it is pinned here.
+  await atomicJson(join(older.dir, 'run.json'), { ...older, createdAt: '2024-01-01T00:00:00.000Z' });
+  await atomicJson(join(newer.dir, 'run.json'), { ...newer, createdAt: '2024-01-02T00:00:00.000Z' });
+  await atomicJson(join(newer.dir, 'activity.json'), { task: 'running', process: 'idle', at: '2024-01-02T00:10:00.000Z' });
+  let panes = await btwPanes(root, client, { rexSession: 'rex' });
+  assert.deepEqual(panes.map(pane => pane.run.id), [newer.id, older.id]);
+  assert.equal(panes[0].exit, undefined);
+  assert.equal(panes[0].activity.process, 'idle');
+  assert.equal(panes[0].result, undefined);
+  // Another parent's side conversation is never offered.
+  assert.deepEqual(await btwPanes(root, client, { rexSession: 'another' }), []);
+  // A closed pane is history, not a destination.
+  await atomicJson(join(older.dir, 'run.json'), { ...older, createdAt: '2024-01-01T00:00:00.000Z', closed: true });
+  panes = await btwPanes(root, client, { rexSession: 'rex' });
+  assert.deepEqual(panes.map(pane => pane.run.id), [newer.id]);
+  // An exited but retained pane is still listed: a question may replace it.
+  await atomicJson(join(newer.dir, 'exit.json'), { code: 0 });
+  panes = await btwPanes(root, client, { rexSession: 'rex' });
+  assert.deepEqual(panes.map(pane => pane.run.id), [newer.id]);
+  assert.deepEqual(panes[0].exit, { code: 0 });
+  // A pane whose block is gone is retired, exactly as before a launch.
+  client.blocks.delete(newer.block);
+  const inspect = client.inspect;
+  client.inspect = async run => { if (!client.blocks.has(run.block)) throw missingBlock(run); return inspect(run); };
+  assert.deepEqual(await btwPanes(root, client, { rexSession: 'rex' }), []);
+  const retired = await readJson(join(newer.dir, 'run.json'));
+  assert.equal(retired.closed, true); assert.equal(retired.completedBeforeClose, true);
+  // An unresolved launch still blocks rather than being guessed at.
+  await atomicJson(join(older.dir, 'run.json'), { ...older, block: undefined, closed: false });
+  await assert.rejects(btwPanes(root, client, { rexSession: 'rex' }), /unresolved/);
+});
+
+test('one side conversation queues, focuses or is replaced by a question', async t => {
+  const root = await temp(t), client = fakeRex(), run = await create(root, client, 'btw');
+  const [pane] = await btwPanes(root, client, { rexSession: 'rex' });
+  const queued = await reuseBtw(pane, client, { rexSession: 'rex', task: 'question' });
+  assert.equal(queued.id, run.id); assert.equal(queued.status, 'queued'); assert.equal(queued.reused, true);
+  assert.equal((await readJson(join(run.dir, `input-${queued.request}.json`))).text, 'question');
+  // A picked pane travels without an inspected exit record; it is read here.
+  const composed = await reuseBtw({ run }, client, { rexSession: 'rex', task: 'q', message: 'pre\n\nq\n\npost' });
+  assert.equal((await readJson(join(run.dir, `input-${composed.request}.json`))).text, 'pre\n\nq\n\npost');
+  const focused = await reuseBtw({ run }, client, { rexSession: 'rex' });
+  assert.equal(focused.status, 'focused'); assert.equal(client.calls.at(-1).action, 'focus');
+  await assert.rejects(reuseBtw({ run }, client, { rexSession: 'rex', task: 'q', cwd: '/elsewhere' }), /another cwd/);
+  await atomicJson(join(run.dir, 'exit.json'), { code: 0 });
+  const replaced = await reuseBtw({ run }, client, { rexSession: 'rex', task: 'after exit' });
+  assert.deepEqual({ id: replaced.id, closed: replaced.closed, replaced: replaced.replaced }, { id: run.id, closed: true, replaced: true });
+  assert.equal(client.calls.at(-1).action, 'close');
+  assert.equal((await readJson(join(run.dir, 'run.json'))).closed, true);
+  assert.equal((await readdir(run.dir)).some(file => file.startsWith('input-') && file !== `input-${queued.request}.json` && file !== `input-${composed.request}.json`), false);
 });
 
 test('window CLI has a group title, split targets exact owned block and preserves focus', async () => {

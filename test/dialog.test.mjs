@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { dialogComponent, createDialogs, wrapText } from '../src/dialog.mjs';
+import { dialogComponent, nativePickerComponent, createDialogs, wrapText, matchesChord } from '../src/dialog.mjs';
 
 function component(config) {
   const results = [];
@@ -114,4 +114,113 @@ test('a dismissed dialog ignores queued confirmation, navigation and cancellatio
     assert.deepEqual(h.results, [first === 'confirm' ? 'one' : undefined]);
     assert.equal(state.value, 'one');
   }
+});
+
+test('ctrl+n is recognised in the three terminal encodings and nothing else', () => {
+  // Legacy control byte, Kitty CSI-u (with and without an event suffix), and
+  // xterm modifyOtherKeys; a plain n, arrow keys and other chords are not it.
+  for (const data of ['\x0e', '\x1b[110;5u', '\x1b[110;5:1u', '\x1b[110;5:3u', '\x1b[27;5;110~']) {
+    assert.equal(matchesChord(data, 'ctrl+n'), true, JSON.stringify(data));
+  }
+  for (const data of ['n', '\x0dn', '\x1b[110;3u', '\x1b[110;1u', '\x1b[27;3;110~', '\x1b[27;5;109~', '', '\x1b[A']) {
+    assert.equal(matchesChord(data, 'ctrl+n'), false, JSON.stringify(data));
+  }
+  for (const chord of [undefined, '', 'n', 'n+ctrl', 'ctrl+', 'shift+n']) assert.equal(matchesChord('\x0e', chord), false, String(chord));
+});
+
+test('hotkeys are ignored without choices and the hint line defaults to selectHint', () => {
+  const viewer = component({ title: 'Logs', text: 'line one' });
+  viewer.component.render(84);
+  viewer.component.handleInput('\x0e');
+  assert.deepEqual(viewer.results, []);
+  const standard = component({ title: 'Tasks', choices: [{ value: 'one', label: 'One' }] });
+  // The overlay row is fitted, which collapses runs of spaces to one.
+  assert.match(standard.component.render(84).join('\n'), /↑↓ Select +Enter Confirm +Esc Back/);
+});
+
+function nativePicker(config) {
+  const results = [];
+  const tui = { terminal: { rows: 16 }, requestRender() {} };
+  return { tui, results, component: nativePickerComponent({ tui, theme: {}, language: 'en',
+    title: 'Side Conversations', keys: { matches: (data, key) => data === key },
+    done: value => results.push(value), choices: [], ...config }) };
+}
+const panes = [
+  { value: 'pane-1', label: 'why werent subagents spawned', detail: 'Pi idle · 12m',
+    full: 'why werent subagents spawned for this task' },
+  { value: 'pane-2', label: 'observational memory warning', detail: 'Running · 48m',
+    full: 'i got this warning: Warning: Observational memory' },
+  { value: 'new', label: '＋ New side conversation', full: '＋ New side conversation' },
+];
+
+test('the side-conversation picker uses the model picker chrome, not the overlay box', () => {
+  const h = nativePicker({ choices: panes, canCreate: true, hotkeys: { 'ctrl+n': 'new' } });
+  const lines = h.component.render(87);
+  assert.equal(lines[0], '─'.repeat(87));
+  assert.equal(lines.at(-1), '─'.repeat(87));
+  assert.ok(lines.every(line => !line.includes('│') && !line.includes('›')));
+  // Title under the rule, like the prompt-snippets menu; then a blank line.
+  assert.equal(lines[1], ' Side Conversations');
+  assert.equal(lines[2], '');
+  assert.match(lines.join('\n'), /^ {2}→ why werent subagents spawned · Pi idle · 12m$/m);
+  assert.match(lines.join('\n'), /^ {4}observational memory warning · Running · 48m$/m);
+  assert.match(lines.join('\n'), /^ {4}＋ New side conversation$/m);
+  assert.match(lines.join('\n'), /Selected: why werent subagents spawned for this task/);
+  assert.match(lines.join('\n'),
+    /Enter to select · Ctrl\+N to start a new side conversation · Esc to cancel/);
+});
+
+test('the picker follows the cursor in its footer and hides New without a question', () => {
+  const h = nativePicker({ choices: panes.slice(0, 2) });
+  assert.doesNotMatch(h.component.render(87).join('\n'), /Ctrl\+N/);
+  assert.match(h.component.render(87).join('\n'), /Selected: why werent subagents spawned for this task/);
+  h.component.handleInput('tui.select.down');
+  assert.match(h.component.render(87).join('\n'), /^ {2}→ observational memory warning/m);
+  assert.match(h.component.render(87).join('\n'), /Selected: i got this warning: Warning: Observational memory/);
+});
+
+test('picker keys: ctrl+n picks New, Enter confirms, Esc cancels', () => {
+  const hotkey = nativePicker({ choices: panes, canCreate: true, hotkeys: { 'ctrl+n': 'new' } });
+  hotkey.component.render(87);
+  hotkey.component.handleInput('\x0e');
+  assert.deepEqual(hotkey.results, ['new']);
+
+  const confirm = nativePicker({ choices: panes, canCreate: true });
+  confirm.component.render(87);
+  confirm.component.handleInput('tui.select.down');
+  confirm.component.handleInput('tui.select.confirm');
+  assert.deepEqual(confirm.results, ['pane-2']);
+
+  const cancel = nativePicker({ choices: panes, canCreate: true });
+  cancel.component.render(87);
+  cancel.component.handleInput('tui.select.cancel');
+  assert.deepEqual(cancel.results, [undefined]);
+  cancel.component.handleInput('tui.select.confirm');
+  assert.deepEqual(cancel.results, [undefined]);
+});
+
+test('a long picker list scrolls inside the terminal and reports its position', () => {
+  const many = Array.from({ length: 40 }, (_, i) => ({ value: `p${i}`, label: `pane ${i}`, detail: 'idle' }));
+  const h = nativePicker({ choices: many, canCreate: true });
+  const lines = h.component.render(60);
+  assert.ok(lines.length <= h.tui.terminal.rows, `${lines.length} lines for ${h.tui.terminal.rows} rows`);
+  assert.match(lines.join('\n'), /\(1\/40\)/);
+  for (let i = 0; i < 12; i++) h.component.handleInput('tui.select.down');
+  const scrolled = h.component.render(60).join('\n');
+  assert.match(scrolled, /→ pane 12/);
+  assert.match(scrolled, /\(13\/40\)/);
+});
+
+test('dialogs.pick is inline and dialogs.select stays an overlay', async () => {
+  const calls = [];
+  const ctx = { hasUI: true, ui: { custom: (factory, config) => {
+    calls.push(config);
+    factory({ terminal: { rows: 24 }, requestRender() {} }, {}, { matches: () => false }, () => {});
+    return Promise.resolve(undefined);
+  } } };
+  const dialogs = createDialogs(() => 'en');
+  await dialogs.pick(ctx, panes);
+  await dialogs.select(ctx, 'Tasks', [{ value: 'a', label: 'A' }]);
+  assert.equal(calls[0], undefined);
+  assert.equal(calls[1].overlay, true);
 });

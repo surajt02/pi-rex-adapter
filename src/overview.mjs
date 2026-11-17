@@ -36,6 +36,28 @@ export function rowLabel(row, language = 'en') {
     ? t(language, `delivery_${row.deliveryState}`) : undefined;
   return `[${kinds[row.kind] || row.kind}] ${delivery ? fit(row.name, 28) : plain(row.name)} · ${delivery || `${t(language, row.taskState)}${process ? ` / ${process}` : ''}`}${row.cleanupError ? ` · ${t(language, 'cleanupFailed')}` : ''}`;
 }
+// A side conversation's state, in the words the rest of the UI already uses:
+// an exited process first, then an idle Pi, then the task state (starting,
+// running, …). Age is when the pane last reported activity.
+export function ageText(value, now = Date.now()) {
+  const start = Date.parse(value || '');
+  if (!start) return '';
+  const minutes = Math.floor(Math.max(0, now - start) / 60000);
+  if (minutes < 1) return '<1m';
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
+}
+// One picker row: the name in the accent colour, the state and age as muted
+// detail, and the untruncated name for the "Selected:" footer.
+export function btwRowParts(pane, language = 'en', now = Date.now()) {
+  const { run, exit, result, activity } = pane;
+  const states = runStates(run, exit, result, activity);
+  const state = exit ? t(language, 'exited')
+    : states.processState === 'idle' ? t(language, 'idle') : t(language, states.taskState);
+  const age = ageText(activity?.at ?? run.createdAt, now);
+  return { name: plain(run.name), detail: [state, age].filter(Boolean).join(' · '), full: plain(run.name) };
+}
 function rank(row) {
   if (row.closed) return 3;
   if (['running', 'launching', 'uncertain'].includes(row.taskState)) return 0;

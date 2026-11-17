@@ -2,10 +2,10 @@ import { watch } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Rex, rexExecutable, atomicJson, readJson, listRuns, prepareRun,
+import { Rex, rexExecutable, atomicJson, readJson, listRuns, prepareRun, composeUserMessage,
   contextSnapshot, tailFile, runStatus, runStates } from './core.mjs';
 
-import { withLayoutLock, existingBtw, choosePlacement, applyGrid, applyChip } from './layout.mjs';
+import { withLayoutLock, existingBtw, btwPanes, reuseBtw, choosePlacement, applyGrid, applyChip } from './layout.mjs';
 import { windowOf } from './grid.mjs';
 import { discoverRoles, findRole, applyRole, roleSummary } from './roles.mjs';
 import { MAX_STEPS, createChain, readChain, writeChain, chainSummary, composeTask, stepLabel, chainDirectory } from './chain.mjs';
@@ -16,7 +16,7 @@ import { directRun, observeLifecycles, stalledLaunch } from './lifecycle.mjs';
 import { createDialogs } from './dialog.mjs';
 import { DEFAULT_CONFIG, loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
-import { taskRow, showOverview, activeOverviewRows, visibleRows, orderRows, rowLabel, plain, fit, buildGroups, FRAME_MS } from './overview.mjs';
+import { taskRow, showOverview, activeOverviewRows, visibleRows, orderRows, rowLabel, btwRowParts, plain, fit, buildGroups, FRAME_MS } from './overview.mjs';
 import { agentSnapshot, agentBody, agentHeader, chainSnapshot, pipelineBody, pipelineHeader, fingerprint, component, spinning } from './transcript.mjs';
 
 const runner = fileURLToPath(new URL('./runner.mjs', import.meta.url));
@@ -581,6 +581,33 @@ export default function adapter(pi, dependencies = {}) {
     else configureControls(false);
   });
 
+  // A user asking a side question picks where it goes as soon as one side
+  // conversation exists: sending it to a pane the reader can see, or starting
+  // another one. The choice is made before the launch and outside the layout
+  // lock, because a modal must never be held open under it. Tool launches,
+  // headless sessions and a session with no panes keep the automatic reuse.
+  async function chooseBtw(task, ctx) {
+    if (!ctx?.hasUI || !root || !process.env.REX_SESSION) return undefined;
+    const epoch = generation, signal = lifetime.signal;
+    const panes = await btwPanes(root, await rex(), { rexSession: process.env.REX_SESSION, signal });
+    signal.throwIfAborted();
+    if (epoch !== generation || !panes.length) return undefined;
+    const selection = await dialogs.pick(ctx, [
+      ...panes.map(pane => {
+        const parts = btwRowParts(pane, config.language);
+        return { value: pane.run.id, label: parts.name, detail: parts.detail, full: parts.full };
+      }),
+      // A bare /btw only focuses, so there is nothing for a new pane to receive.
+      ...(task ? [{ value: 'new', label: ui('btwPickerNew'), full: ui('btwPickerNew') }] : []),
+    ], { title: ui('btwPicker'), canCreate: Boolean(task),
+      ...(task ? { hotkeys: { 'ctrl+n': 'new' } } : {}) });
+    if (epoch !== generation) return undefined;
+    if (selection === undefined) return 'dismissed';
+    if (selection === 'new') return { new: true };
+    const pane = panes.find(entry => entry.run.id === selection);
+    return pane ? { run: pane.run } : 'dismissed';
+  }
+
   async function launch(kind, params, ctx, requestedSignal) {
     const signal = signalFor(requestedSignal); signal.throwIfAborted();
     const epoch = generation;
@@ -594,6 +621,9 @@ export default function adapter(pi, dependencies = {}) {
     if (!root || ctx.sessionManager.getSessionId() !== current?.sessionManager.getSessionId()) throw new Error('Session is not ready');
     if (!process.env.REX_SESSION || !process.env.REX_BLOCK) throw new Error('Start Pi inside Rex (REX_SESSION and REX_BLOCK are required).');
     const task = params.task?.trim();
+    // Only a user's own /btw question carries prompt snippets; a tool launch or
+    // a delegated task is the parent agent's text, not the user's message.
+    const message = kind === 'btw' && params.fromUser && task ? composeUserMessage(task) : task;
     // A delegated agent must say what its goal is in six words or fewer; the
     // parent list is a column of goals, and a long task string erodes it.
     const label = checkLabel(params.label);
@@ -605,10 +635,17 @@ export default function adapter(pi, dependencies = {}) {
     try {
       const client = await rex();
       if (kind === 'btw') {
-        const reused = await existingBtw(launchRoot, client, { task, signal,
+        const reuse = { task, message, signal,
           rexSession: process.env.REX_SESSION, model: params.model,
-          cwd: params.cwd ? resolve(ctx.cwd, params.cwd) : undefined });
-        if (reused) { if (epoch === generation) { tracked.set(reused.id, reused.artifacts); monitor(); void reconcile(); } return reused; }
+          cwd: params.cwd ? resolve(ctx.cwd, params.cwd) : undefined };
+        // A picked pane is reused directly; a picked New skips reuse entirely;
+        // no choice at all is the tool path, which still reuses automatically.
+        const reused = params.btwChoice?.run ? await reuseBtw({ run: params.btwChoice.run }, client, reuse)
+          : params.btwChoice?.new ? undefined : await existingBtw(launchRoot, client, reuse);
+        if (reused && !reused.replaced) {
+          if (epoch === generation) { tracked.set(reused.id, reused.artifacts); monitor(); void reconcile(); }
+          return reused;
+        }
       }
       if (!task) throw new Error('Task must not be empty; use /btw <question> to start a side conversation.');
       const roles = params.agent ? discoverRoles(ctx.cwd) : undefined;
@@ -630,7 +667,7 @@ export default function adapter(pi, dependencies = {}) {
       signal.throwIfAborted();
       const snapshot = kind === 'shell' || params.fork === false || role?.fork === false
         ? '' : contextSnapshot(ctx.sessionManager.getBranch());
-      const run = await prepareRun(launchRoot, options, snapshot);
+      const run = await prepareRun(launchRoot, { ...options, message }, snapshot);
       let requested = false;
       try {
         signal.throwIfAborted();
@@ -894,6 +931,8 @@ export default function adapter(pi, dependencies = {}) {
       try {
         const result = await handler(args, ctx);
         if (epoch !== generation) return;
+        // Esc in a picker is a cancel, not a failed launch: say nothing at all.
+        if (result?.status === 'dismissed') return;
         if (result.status === 'uncertain') await dialogs.view(ctx, ui('launchUncertain'), `${result.error}\n\n${ui('checkRex')}`);
         else actionStatus(ctx, result.reused ? ui('reused') : ui('started'));
       } catch (error) { if (epoch === generation) await dialogs.view(ctx, ui('actionError'), error.message); }
@@ -973,7 +1012,11 @@ export default function adapter(pi, dependencies = {}) {
     };
     toolDefinitions.set(name, definition); pi.registerTool(definition);
   }
-  command('btw', 'Open an independent side conversation in a right-hand Rex block', (task, ctx) => launch('btw', { task }, ctx));
+  command('btw', 'Open an independent side conversation in a right-hand Rex block', async (task, ctx) => {
+    const btwChoice = await chooseBtw(task, ctx);
+    if (btwChoice === 'dismissed') return { status: 'dismissed' };
+    return launch('btw', { task, fromUser: true, btwChoice }, ctx);
+  });
   command('bg', 'Run a shell command in a background Rex block; report completion automatically', (task, ctx) => launch('shell', { task }, ctx));
   command('rex-agent', 'Delegate a task to a Pi process in a background Rex tab', (task, ctx) => launch('agent', { task, label: deriveLabel(task) }, ctx));
   const fields = { task: string, name: string, label: string, cwd: string, model: string, fork: { type: 'boolean' } };

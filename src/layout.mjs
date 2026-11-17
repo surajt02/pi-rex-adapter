@@ -9,7 +9,7 @@ import { missingBlock, recordLifecycle } from './lifecycle.mjs';
 // Called under the parent's layout lock, only while choosing/reusing a pane.
 // Keep ambiguous failures blocking; an exited process plus an explicitly absent
 // block is enough to retire the stale record without sending another close.
-async function inspectOrRetire(client, run, signal) {
+export async function inspectOrRetire(client, run, signal) {
   try { return await client.inspect(run, signal); }
   catch (error) {
     signal?.throwIfAborted();
@@ -30,35 +30,60 @@ async function inspectOrRetire(client, run, signal) {
   }
 }
 
-export async function existingBtw(root, client, options) {
+// Every open side conversation of this parent, newest first. Panes whose block
+// is gone are retired here, exactly as they are before a launch; an unresolved
+// block still blocks, because guessing would either lose a pane or double it.
+export async function btwPanes(root, client, options) {
   const { signal } = options;
   signal?.throwIfAborted();
   const candidates = (await listRuns(root)).filter(r => r.kind === 'btw' && !r.closed && r.rexSession === options.rexSession);
-  for (const run of candidates.sort((a, b) => b.createdAt.localeCompare(a.createdAt))) {
-    const exit = await readJson(join(run.dir, 'exit.json'));
+  const panes = [];
+  for (const run of candidates.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id))) {
     if (!run.block) throw new Error(`BTW launch ${run.id} is unresolved; inspect Rex before retrying.`);
+    const exit = await readJson(join(run.dir, 'exit.json'));
     const actual = await inspectOrRetire(client, run, signal);
     if (!actual) continue;
     signal?.throwIfAborted();
     run.window = actual.window;
-    if (exit && options.task) {
-      await client.control(run, 'close', signal);
-      run.closed = true; run.completedBeforeClose = true;
-      await atomicJson(join(run.dir, 'run.json'), run);
-      continue;
+    const [result, activity] = await Promise.all(['result', 'activity'].map(name => readJson(join(run.dir, `${name}.json`))));
+    panes.push({ run, exit, result, activity });
+  }
+  return panes;
+}
+
+// What one live pane does with an incoming question: queue it, focus it, or
+// retire an exited pane that a question replaces. Shared by the automatic reuse
+// and by the pane the user picked, so both behave identically.
+export async function reuseBtw(pane, client, options) {
+  const { signal } = options;
+  signal?.throwIfAborted();
+  const run = pane.run;
+  const exit = 'exit' in pane ? pane.exit : await readJson(join(run.dir, 'exit.json'));
+  if (exit && options.task) {
+    await client.control(run, 'close', signal);
+    run.closed = true; run.completedBeforeClose = true;
+    await atomicJson(join(run.dir, 'run.json'), run);
+    return { id: run.id, block: run.block, window: run.window, closed: true, replaced: true, status: 'replaced', artifacts: run.dir };
+  }
+  if (options.task) {
+    if (run.inputProtocol !== 1) throw new Error('Reload this existing BTW Pi to enable question delivery, or close it and start a new BTW.');
+    if ((options.cwd && options.cwd !== run.cwd) || (options.model && options.model !== run.model)) {
+      throw new Error('Existing BTW uses another cwd/model. Close it before starting a new conversation.');
     }
-    if (options.task) {
-      if (run.inputProtocol !== 1) throw new Error('Reload this existing BTW Pi to enable question delivery, or close it and start a new BTW.');
-      if ((options.cwd && options.cwd !== run.cwd) || (options.model && options.model !== run.model)) {
-        throw new Error('Existing BTW uses another cwd/model. Close it before starting a new conversation.');
-      }
-      const request = randomUUID();
-      signal?.throwIfAborted();
-      await atomicJson(join(run.dir, `input-${request}.json`), { id: request, text: options.task, createdAt: new Date().toISOString() });
-      return { id: run.id, block: run.block, window: run.window, reused: true, request, status: 'queued', artifacts: run.dir };
-    }
-    await client.control(run, 'focus', signal);
-    return { id: run.id, block: run.block, window: run.window, reused: true, status: 'focused', artifacts: run.dir };
+    const request = randomUUID();
+    signal?.throwIfAborted();
+    await atomicJson(join(run.dir, `input-${request}.json`), { id: request, text: options.message ?? options.task, createdAt: new Date().toISOString() });
+    return { id: run.id, block: run.block, window: run.window, reused: true, request, status: 'queued', artifacts: run.dir };
+  }
+  await client.control(run, 'focus', signal);
+  return { id: run.id, block: run.block, window: run.window, reused: true, status: 'focused', artifacts: run.dir };
+}
+
+export async function existingBtw(root, client, options) {
+  for (const pane of await btwPanes(root, client, options)) {
+    const reused = await reuseBtw(pane, client, options);
+    // An exited pane was closed by this question; an older one may still take it.
+    if (reused && !reused.replaced) return reused;
   }
 }
 

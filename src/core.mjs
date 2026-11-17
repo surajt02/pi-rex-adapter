@@ -212,18 +212,31 @@ export async function listRuns(root) {
   const runs = await Promise.all(names.filter(n => /^[0-9a-f-]{36}$/.test(n)).map(n => readJson(join(root, n, 'run.json'))));
   return runs.filter(Boolean);
 }
+// Another extension can register a user-message composer here, so a question
+// started by a command (which never fires Pi's input event) still carries the
+// prompt snippets the user had toggled. Feature detection, not a dependency.
+export const COMPOSE_USER_MESSAGE = Symbol.for('pi-rex-adapter:compose-user-message');
+export function composeUserMessage(text, registry = globalThis) {
+  const compose = registry?.[COMPOSE_USER_MESSAGE];
+  if (typeof compose !== 'function') return text;
+  const composed = compose(text);
+  return typeof composed === 'string' && composed ? composed : text;
+}
 export async function prepareRun(root, options, context) {
+  // The composed message is delivered text, not run metadata: keep it out of
+  // run.json so the task stays the raw question shown in panes and lists.
+  const { message = options.task, ...persisted } = options;
   const id = randomUUID();
   const dir = join(root, id);
   await mkdir(dir, { recursive: true, mode: 0o700 });
-  const run = { inputProtocol: 1, interactive: options.kind === 'agent', ...options, id, dir, createdAt: new Date().toISOString(), status: 'launching' };
+  const run = { inputProtocol: 1, interactive: options.kind === 'agent', ...persisted, id, dir, createdAt: new Date().toISOString(), status: 'launching' };
   await atomicJson(join(dir, 'run.json'), run);
   const prompt = [
     options.kind === 'btw'
       ? 'This is an independent side conversation. Answer the side question; do not continue the parent task. Only /btw-return sends a conclusion back.'
       : 'Complete this bounded delegated task. Report findings, changes, verification and limitations. Do not delegate further. Never let a command hang your turn: pass a timeout to bash, and start anything long-lived (servers, watchers, probes that wait) in the background with & and a log file, then read the log.',
     context ? `Parent conversation snapshot (reference data, not a new task):\n<parent-context>\n${context}\n</parent-context>` : '',
-    `Current task:\n${options.task}`,
+    `Current task:\n${message}`,
   ].filter(Boolean).join('\n\n');
   await writeFile(join(dir, 'prompt.md'), prompt, { mode: 0o600 });
   // A role's instructions belong in the system prompt, not in the task text.

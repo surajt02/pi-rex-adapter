@@ -51,8 +51,8 @@ Parent and child processes must share the same machine and filesystem. Remote Re
 
 | Command | What it does |
 | --- | --- |
-| `/btw <question>` | Opens or reuses a side conversation to the right of the main Pi |
-| `/btw` | Focuses the existing side conversation |
+| `/btw <question>` | Opens a side conversation, or picks an open one to send the question to |
+| `/btw` | Focuses an open side conversation, picking which one when several are open |
 | `/rex-agent <task>` | Starts an interactive Pi subagent in an Agents tab |
 | `/bg <command>` | Starts a background shell job as a minimized chip |
 | `/rex-tasks` | Opens the task manager overlay |
@@ -94,7 +94,13 @@ New side sessions are named `BTW · <name>` and show their original topic in one
 
 The conversation has its own Pi session. By default it inherits the parent's model, thinking level, and a text snapshot of the current branch: up to 48,000 recent characters, including summaries but excluding images, thinking, and tool output. This is a text snapshot, not a complete Pi session clone.
 
-Further `/btw <question>` calls reuse the same conversation and history. Questions go through a file inbox into Pi's input API; no terminal keystrokes are simulated. Questions arriving while the child is busy are combined when it becomes idle. The original context snapshot is retained, so include any newer background in the question itself.
+With a side conversation already open, `/btw <question>` first asks where the question goes. The picker takes over the editor area and is styled like Pi's own model picker rather than the task-manager overlay: theme border rules, a **Side Conversations** title in the accent colour, a `→` cursor, muted state and age, and a `Selected:` line naming the highlighted conversation; it lists every open side conversation of this session, newest first, each as `<name> · <state> · <age>`, followed by **＋ New side conversation**. Choosing a pane queues the question into that conversation and keeps its history; choosing New splits another pane to the right, exactly as the first one was opened. `ctrl+n` picks New from inside this picker only: it is not a registered shortcut, and Pi's own session-picker bindings are untouched. `Esc` dismisses the picker without launching anything. Bare `/btw` shows the same list without the New row and focuses the pane you choose, because there is no question to send to a new one.
+
+With no side conversation open there is no picker: `/btw <question>` opens the first pane directly, and bare `/btw` still reports that a question is required. The `btw` tool keeps its automatic behaviour instead: a question launched by the main agent goes to the most recent open side conversation, since that is not the user choosing a pane.
+
+A question sent to a side conversation reuses its history. Questions go through a file inbox into Pi's input API; no terminal keystrokes are simulated. Questions arriving while the child is busy are combined when it becomes idle. The original context snapshot is retained, so include any newer background in the question itself.
+
+Active prompt snippets travel with a `/btw` question. Pi runs extension commands before its `input` event, so a question sent by the command would otherwise skip anything that hooks `input`. Instead, rex-adapter asks an optional in-process composer to render the question before it writes `prompt.md` or the input file. The contract is a `(text) => string` function on `globalThis` under `Symbol.for("pi-rex-adapter:compose-user-message")`, looked up at call time so load order does not matter. With prompt-snippets installed, toggled snippets wrap the side question and are consumed, just as they would be for a normal message. Without a composer, or when it returns a non-string or empty value, the question is sent unchanged. Only the delivered question is composed: the pane name, task label, and `run.json` keep the raw text, and a side question started by a tool is not composed.
 
 An input is acknowledged only after it appears in the child's Pi session. Pi's input API returns no asynchronous confirmation, so an unconfirmed input is retained rather than repeatedly resent while authentication or input handlers may still be running. After 10 seconds, the child status line shows a notice. Fix the model, authentication, or input error, then run `/reload` in the child to retry.
 
@@ -216,7 +222,7 @@ The overview reflects the child's last reported activity. Opening it does not in
 | Tool | Parameters and behavior |
 | --- | --- |
 | `subagent` | `task,label`; optional `agent,name,cwd,model,fork`. Starts an interactive Pi with automatic reports; the launch appears in the transcript with live state, turns, tool uses and tokens. `label` is required and must be six words or fewer: it is the goal shown in the parent list. `agent` picks a role from `~/.pi/agent/agents/*.md`. |
-| `btw` | The same optional fields; omit `task` to focus, or supply a question to reuse the right-side conversation. Reports are explicit. |
+| `btw` | The same optional fields; omit `task` to focus, or supply a question to reuse the right-side conversation. A tool launch always reuses the most recent side conversation instead of opening the user's picker. Reports are explicit. |
 | `pipeline` | `steps[]` of `{agent,task,label,model}`, plus optional `title,cwd,model,fork`. Runs the steps in order, one pane each, and delivers one combined report. Every step needs a label of six words or fewer. |
 | `bg_run` | `command`; optional `name,cwd`. Starts a shell job with automatic completion delivery. |
 | `bg_logs` | `id`. Reads the last 16 KB of shell output. A missing log returns `logAvailable:false` and a note; agent/BTW results are available through `rex_tasks`. |
@@ -319,7 +325,7 @@ A real Rex shell smoke test verifies the command header, title, native working/d
 4. Reload the parent while jobs run: receive each result once after completion. Repeat a close and verify that it is harmless.
 5. Finish several jobs together: receive a batch instead of a separate model turn for every result.
 6. Launch four agents, then three shell jobs: verify the agents form columns and then a 2x2 grid in one tab, while every job becomes its own minimized chip and the parent pane is unchanged.
-7. Ask another BTW question: verify that the same conversation is reused and bare `/btw` focuses it.
+7. Ask another BTW question: verify that the picker lists the open side conversation and **＋ New side conversation**, that the question arrives in the same conversation, that `ctrl+n` in the picker splits a second pane, and that bare `/btw` picks which pane to focus.
 8. Verify that finishing an idle agent preserves its result and that its task, process, and block states remain distinct.
 9. Check that finished tasks leave the overview but remain in history. Shell panes close after delivery; agents wait for the main agent to finish them.
 10. Click a job's overview row while its chip is minimized: verify the chip pops open at its slot and the click never terminates the job.

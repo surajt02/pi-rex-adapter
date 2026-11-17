@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, readdir, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { Rex, prepareRun, readJson, atomicJson, piArgs, contextSnapshot, tailFile, runStatus } from '../src/core.mjs';
+import { Rex, prepareRun, readJson, listRuns, atomicJson, piArgs, contextSnapshot, tailFile, runStatus,
+  composeUserMessage, COMPOSE_USER_MESSAGE } from '../src/core.mjs';
 import adapter from '../src/index.mjs';
 
 async function temporary(t) {
@@ -88,6 +89,38 @@ test('fresh child session, literal prompt file and explicit extension; BTW has l
   assert.equal((await readJson(join(run.dir, 'run.json'))).id, run.id);
   assert.match(await readFile(join(run.dir, 'prompt.md'), 'utf8'), /`touch BAD`/);
 });
+test('a composed message reaches prompt.md while run.task stays the raw question', async t => {
+  const root = await temporary(t);
+  const run = await prepareRun(root, { kind: 'btw', task: 'q', message: 'pre\n\nq\n\npost', name: 'q' }, '');
+  assert.equal(await readFile(join(run.dir, 'prompt.md'), 'utf8'), [
+    'This is an independent side conversation. Answer the side question; do not continue the parent task. Only /btw-return sends a conclusion back.',
+    'Current task:\npre\n\nq\n\npost',
+  ].join('\n\n'));
+  assert.equal(run.task, 'q');
+  const stored = await readJson(join(run.dir, 'run.json'));
+  assert.equal(stored.task, 'q');
+  assert.ok(!('message' in stored));
+});
+test('without a composed message prompt.md and run.json are unchanged', async t => {
+  const root = await temporary(t);
+  const run = await prepareRun(root, { kind: 'btw', task: 'q', name: 'q' }, '');
+  assert.match(await readFile(join(run.dir, 'prompt.md'), 'utf8'), /Current task:\nq$/);
+  assert.equal((await readJson(join(run.dir, 'run.json'))).task, 'q');
+});
+test('the user-message composer is optional, feature-detected and fails safe', () => {
+  // No composer registered: the text is delivered untouched.
+  assert.equal(composeUserMessage('q', {}), 'q');
+  assert.equal(composeUserMessage('q', { [COMPOSE_USER_MESSAGE]: 'not a function' }), 'q');
+  const registry = { [COMPOSE_USER_MESSAGE]: text => `pre\n\n${text}\n\npost` };
+  assert.equal(composeUserMessage('q', registry), 'pre\n\nq\n\npost');
+  // A composer that returns nothing usable must not erase the question.
+  for (const value of [undefined, '', 42, null]) {
+    assert.equal(composeUserMessage('q', { [COMPOSE_USER_MESSAGE]: () => value }), 'q');
+  }
+  // A throwing composer is the caller's problem to report, not silently swallowed.
+  assert.throws(() => composeUserMessage('q', { [COMPOSE_USER_MESSAGE]: () => { throw new Error('broken snippet'); } }), /broken snippet/);
+});
+
 test('real shell runner captures stdout/stderr, nonzero exit and bounded result with full log', async t => {
   const root = await temporary(t);
   const run = await prepareRun(root, { kind: 'shell', task: 'printf hello; printf error >&2; exit 7', cwd: root }, '');
@@ -131,16 +164,26 @@ test('shell jobs default Python to unbuffered output and preserve an explicit se
   }
 });
 
-function harness(root, entries = [], dependencies = {}) {
-  const events = {}, commands = {}, tools = {}, messages = [];
-  const ctx = { cwd: root, hasUI: false, isIdle: () => true, sessionManager: {
+// `overlay` turns on a UI with a scripted ctx.ui.custom: dialogs are recorded in
+// `pickers` and answered by driving their component, so a modal command can be
+// tested without a terminal. Without it the session stays headless, exactly as
+// the existing tests expect.
+function harness(root, entries = [], dependencies = {}, overlay = false) {
+  const events = {}, commands = {}, tools = {}, messages = [], pickers = [], statuses = [];
+  const ctx = { cwd: root, hasUI: Boolean(overlay), isIdle: () => true, sessionManager: {
     getSessionDir: () => root, getSessionId: () => 'parent', getEntries: () => entries, getBranch: () => entries,
-  }, ui: { notify() {}, setStatus() {} } };
+  }, ui: { notify() {}, setStatus: (key, text) => { statuses.push({ key, text }); },
+    custom: (factory, config) => overlay ? new Promise(resolve => {
+      const component = factory({ terminal: { rows: 32 }, requestRender() {} }, {},
+        { matches: (data, key) => data === key }, resolve);
+      pickers.push({ component, config, render: () => component.render(87).join('\n') });
+    }) : Promise.reject(new Error('overlay opened without a UI')),
+  } };
   adapter({ on: (n, f) => { events[n] = f; }, registerCommand: (n, f) => { commands[n] = f; },
     registerTool: t => { tools[t.name] = t; }, getThinkingLevel: () => 'off',
     sendMessage: (m, options) => { messages.push({ ...m, options }); entries.push({ type: 'custom_message', ...m }); },
   }, dependencies);
-  return { ctx, events, commands, tools, messages, entries };
+  return { ctx, events, commands, tools, messages, entries, pickers, statuses };
 }
 async function until(predicate) {
   for (let i = 0; i < 350; i++) { if (predicate()) return; await new Promise(r => setTimeout(r, 20)); }
@@ -167,6 +210,27 @@ test('completion pushes one follow-up, reload does not replay it, BTW returns on
   await h.events.session_start({}, h.ctx);
   await new Promise(r => setTimeout(r, 150));
   assert.equal(h.messages.length, 2);
+});
+test('/btw carries the composed user message but keeps the raw question as name and task', async t => {
+  const dir = await temporary(t), h = harness(dir, [], { rex: {
+    inspect: async () => ({ window: 'w' }), open: async () => 'block' } });
+  const saved = { session: process.env.REX_SESSION, block: process.env.REX_BLOCK };
+  process.env.REX_SESSION = 'rex'; process.env.REX_BLOCK = 'parent-block';
+  globalThis[COMPOSE_USER_MESSAGE] = text => `pre\n\n${text}\n\npost`;
+  t.after(() => {
+    h.events.session_shutdown();
+    delete globalThis[COMPOSE_USER_MESSAGE];
+    for (const [key, value] of [['REX_SESSION', saved.session], ['REX_BLOCK', saved.block]]) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+  await h.events.session_start({}, h.ctx);
+  await h.commands.btw.handler('why is it like this', h.ctx);
+  const [run] = await listRuns(join(dir, 'rex-adapter', 'parent'));
+  assert.equal(run.block, 'block');
+  assert.equal(run.task, 'why is it like this');
+  assert.equal(run.name, 'why is it like this');
+  assert.match(await readFile(join(run.dir, 'prompt.md'), 'utf8'), /Current task:\npre\n\nwhy is it like this\n\npost$/);
 });
 test('control rejects arbitrary IDs without contacting Rex', async t => {
   const dir = await temporary(t), h = harness(dir); t.after(() => h.events.session_shutdown());
@@ -383,4 +447,140 @@ test('cancelled shell without result.json retains signal reason and reports resu
   const result = await h.tools.rex_tasks.execute('x', {}, undefined, undefined, h.ctx);
   assert.equal(result.details[0].resultAvailable, false);
   assert.equal(result.details[0].taskState, 'cancelled');
+});
+
+// A live side conversation on disk, as the picker finds it.
+async function btwPane(dir, createdAt = '2024-01-01T00:00:00.000Z', name = 'why werent subagents spawned') {
+  const run = await prepareRun(join(dir, 'rex-adapter', 'parent'), { kind: 'btw', name, task: name }, '');
+  const live = { ...run, block: `block-${run.id.slice(0, 8)}`, rexSession: 'rex', status: 'running', createdAt };
+  await atomicJson(join(run.dir, 'run.json'), live);
+  return live;
+}
+function pickerRex() {
+  const calls = [];
+  let opened = 0;
+  return { calls,
+    async inspect(run) { calls.push(['inspect', run.block]); return { window: 'window-1' }; },
+    async open(run) { calls.push(['open', run.kind]); return `new-block-${++opened}`; },
+    async control(run, action) { calls.push([action, run.block]); },
+  };
+}
+function rexEnvironment(t) {
+  const saved = { session: process.env.REX_SESSION, block: process.env.REX_BLOCK };
+  process.env.REX_SESSION = 'rex'; process.env.REX_BLOCK = 'parent-block';
+  t.after(() => {
+    for (const [key, value] of [['REX_SESSION', saved.session], ['REX_BLOCK', saved.block]]) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+}
+async function pickerFor(h, args) {
+  const pending = h.commands.btw.handler(args, h.ctx);
+  await until(() => h.pickers.length === 1);
+  return { pending, picker: h.pickers[0] };
+}
+
+test('/btw with one side conversation offers it beside a new one, and the pane takes the question', async t => {
+  const dir = await temporary(t), client = pickerRex();
+  rexEnvironment(t);
+  const pane = await btwPane(dir);
+  const h = harness(dir, [], { rex: client }, true);
+  t.after(() => h.events.session_shutdown());
+  await h.events.session_start({}, h.ctx);
+  const { pending, picker } = await pickerFor(h, 'why is this happening');
+  const lines = picker.render();
+  assert.match(lines, /\n Side Conversations\n/);
+  assert.match(lines, /→ why werent subagents spawned · Running · /);
+  assert.match(lines, /＋ New side conversation/);
+  assert.match(lines, /Selected: why werent subagents spawned/);
+  assert.match(lines, /Ctrl\+N to start a new side conversation/);
+  // Inline, like Pi's own pickers: no overlay options and no side borders.
+  assert.equal(picker.config, undefined);
+  assert.doesNotMatch(lines, /│/);
+  assert.doesNotMatch(lines, /Enter sends the question/);
+  // The first row is the live pane; confirming it queues the question there.
+  picker.component.handleInput('tui.select.confirm');
+  await pending;
+  assert.equal(client.calls.some(([name]) => name === 'open'), false);
+  assert.equal((await listRuns(join(dir, 'rex-adapter', 'parent'))).length, 1);
+  const inputs = (await readdir(pane.dir)).filter(name => name.startsWith('input-'));
+  assert.equal(inputs.length, 1);
+  assert.equal((await readJson(join(pane.dir, inputs[0]))).text, 'why is this happening');
+  assert.ok(h.statuses.some(status => status.key === 'rex-action'));
+});
+
+test('ctrl+n in the side-conversation picker starts a second pane and leaves the first alone', async t => {
+  const dir = await temporary(t), client = pickerRex();
+  rexEnvironment(t);
+  const pane = await btwPane(dir);
+  const h = harness(dir, [], { rex: client }, true);
+  t.after(() => h.events.session_shutdown());
+  await h.events.session_start({}, h.ctx);
+  const { pending, picker } = await pickerFor(h, 'a second question');
+  picker.component.handleInput('\x0e');
+  await pending;
+  assert.equal(client.calls.filter(([name]) => name === 'open').length, 1);
+  const runs = await listRuns(join(dir, 'rex-adapter', 'parent'));
+  assert.equal(runs.length, 2);
+  const second = runs.find(run => run.id !== pane.id);
+  assert.equal(second.task, 'a second question');
+  // The picker's choice belongs to the launch, never to the stored run.
+  assert.equal(second.btwChoice, undefined);
+  // The pane the reader did not pick keeps its history and gets no question.
+  assert.equal((await readJson(join(pane.dir, 'run.json'))).closed, undefined);
+  assert.equal((await readdir(pane.dir)).some(name => name.startsWith('input-')), false);
+  assert.equal((await readFile(join(second.dir, 'prompt.md'), 'utf8')).includes('Current task:\na second question'), true);
+});
+
+test('bare /btw picks which side conversation to focus and offers no new one', async t => {
+  const dir = await temporary(t), client = pickerRex();
+  rexEnvironment(t);
+  const first = await btwPane(dir, '2024-01-01T00:00:00.000Z', 'older aside');
+  const second = await btwPane(dir, '2024-01-02T00:00:00.000Z', 'newer aside');
+  const h = harness(dir, [], { rex: client }, true);
+  t.after(() => h.events.session_shutdown());
+  await h.events.session_start({}, h.ctx);
+  const { pending, picker } = await pickerFor(h, undefined);
+  const lines = picker.render();
+  assert.doesNotMatch(lines, /│/);
+  assert.doesNotMatch(lines, /New side conversation/);
+  assert.doesNotMatch(lines, /Ctrl\+N/);
+  // Newest first: the cursor starts on the second pane, which is listed above
+  // the older one.
+  assert.match(lines, /→ newer aside/);
+  assert.ok(lines.indexOf('newer aside') < lines.indexOf('older aside'));
+  picker.component.handleInput('tui.select.confirm');
+  await pending;
+  assert.deepEqual(client.calls.filter(([name]) => name !== 'inspect'), [['focus', second.block]]);
+});
+
+test('Esc in the picker launches nothing and consumes nothing', async t => {
+  const dir = await temporary(t), client = pickerRex();
+  rexEnvironment(t);
+  const pane = await btwPane(dir);
+  const h = harness(dir, [], { rex: client }, true);
+  t.after(() => h.events.session_shutdown());
+  await h.events.session_start({}, h.ctx);
+  const { pending, picker } = await pickerFor(h, 'never sent');
+  picker.component.handleInput('tui.select.cancel');
+  await pending;
+  assert.equal((await listRuns(join(dir, 'rex-adapter', 'parent'))).length, 1);
+  assert.equal(client.calls.some(([name]) => name === 'open'), false);
+  assert.equal((await readdir(pane.dir)).some(name => name.startsWith('input-')), false);
+  // A cancelled picker is not a task that started, was reused, or failed.
+  assert.ok(h.statuses.every(status => status.key !== 'rex-action'));
+});
+
+test('without a UI a side question still reuses the live conversation silently', async t => {
+  const dir = await temporary(t), client = pickerRex();
+  rexEnvironment(t);
+  const pane = await btwPane(dir);
+  const h = harness(dir, [], { rex: client });
+  t.after(() => h.events.session_shutdown());
+  await h.events.session_start({}, h.ctx);
+  await h.commands.btw.handler('headless question', h.ctx);
+  assert.equal(h.pickers.length, 0);
+  const inputs = (await readdir(pane.dir)).filter(name => name.startsWith('input-'));
+  assert.equal(inputs.length, 1);
+  assert.equal((await readJson(join(pane.dir, inputs[0]))).text, 'headless question');
 });
