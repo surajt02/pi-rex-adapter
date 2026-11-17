@@ -50,7 +50,9 @@ export class Rex {
   async open(manifest, runner, signal) {
     signal?.throwIfAborted();
     const layout = manifest.layout;
-    const split = layout?.mode === 'split' || (!layout && manifest.kind === 'btw');
+    // A grid pane is split in first and then arranged, so it needs the same
+    // exact-anchor split as a BTW side conversation.
+    const split = layout?.mode === 'split' || layout?.mode === 'grid' || (!layout && manifest.kind === 'btw');
     const args = split
       ? ['split', '-b', layout?.anchor || manifest.anchor, `--split=${layout?.direction || 'right'}`, '--ratio=50']
       : layout ? ['window', 'new', layout.title] : ['run'];
@@ -67,6 +69,27 @@ export class Rex {
     if (layout && !manifest.window) manifest.window = (await this.inspect(manifest, signal)).window;
     if (layout) layout.window = manifest.window;
     return result.block_ids[0];
+  }
+  async api(method, params, signal) {
+    signal?.throwIfAborted();
+    return this.json(['api', 'call', method, JSON.stringify(params)], signal);
+  }
+  async view(session, signal) {
+    return this.api('session.view', { session_id: session }, signal);
+  }
+  async detach(session, block, signal) {
+    return this.api('session.detach_block', { session_id: session, block_id: block }, signal);
+  }
+  async move(session, { block, anchor, direction, ratio }, signal) {
+    return this.api('session.move_block', { session_id: session, block_id: block,
+      anchor_block_id: anchor, direction, ratio, side: 'after' }, signal);
+  }
+  // Cell pixel size matters: panes are wide or tall depending on it, not on
+  // their column count alone.
+  async size(manifest, signal) {
+    const result = await this.blockJson(manifest, ['block', 'call', '-s', manifest.rexSession, '-b', manifest.block, 'size'], signal);
+    return { columns: result.columns, rows: result.rows,
+      cellWidth: result.cell_width_px, cellHeight: result.cell_height_px };
   }
   async inspect(manifest, signal) {
     const result = await this.blockJson(manifest, ['block', 'inspect', manifest.block, '-s', manifest.rexSession, '--json'], signal);

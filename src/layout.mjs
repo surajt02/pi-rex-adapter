@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { atomicJson, listRuns, readJson, runStatus } from './core.mjs';
 import { DEFAULT_CONFIG } from './config.mjs';
+import { firstLeafIndex, gridPlan, gridTree, paneCount, windowPanes } from './grid.mjs';
 
 export { withLayoutLock } from './core.mjs';
 import { missingBlock, recordLifecycle } from './lifecycle.mjs';
@@ -62,6 +63,21 @@ export async function existingBtw(root, client, options) {
   }
 }
 
+// Every live sibling of the same kind, inspected, with the window it is in now.
+async function liveMembers(root, client, run, role, signal) {
+  const members = (await listRuns(root)).filter(r => r.id !== run.id && r.layout?.role === role && r.rexSession === run.rexSession);
+  const live = [];
+  for (const member of members) {
+    if (member.closed) continue;
+    if (!member.block) throw new Error(`Layout acquisition ${member.id} is unresolved; inspect Rex before launching more ${role}.`);
+    const actual = await inspectOrRetire(client, member, signal);
+    if (!actual) continue;
+    signal?.throwIfAborted();
+    live.push({ member, window: actual.window });
+  }
+  return live;
+}
+
 export async function choosePlacement(root, client, run, signal, panesPerTab = DEFAULT_CONFIG.panesPerTab) {
   signal?.throwIfAborted();
   if (run.kind === 'btw') {
@@ -69,30 +85,99 @@ export async function choosePlacement(root, client, run, signal, panesPerTab = D
     return { role: 'btw', mode: 'split', anchor: run.anchor, direction: 'right', window: parent.window };
   }
   const role = run.kind === 'agent' ? 'agents' : 'jobs';
-  const members = (await listRuns(root)).filter(r => r.id !== run.id && r.layout?.role === role && r.rexSession === run.rexSession);
+  const live = await liveMembers(root, client, run, role, signal);
+  if (role === 'agents') return agentsPlacement(run, live, client, signal);
+  return jobsPlacement(run, live, panesPerTab, role);
+}
+
+// Agents never spill into an "Agents 2" tab: the whole group grows in one grid
+// and a crowded tab is read by zooming, not by paging. The tab we manage is the
+// window most live agents still sit in, so a pane the user dragged somewhere
+// else is left alone and never counted.
+async function agentsPlacement(run, live, client, signal) {
+  const title = `Agents · ${run.owner.slice(0, 8)}`;
+  const recorded = new Map();
+  for (const { member } of live) {
+    const window = member.layout.window;
+    if (typeof window === 'string') recorded.set(window, (recorded.get(window) || 0) + 1);
+  }
+  const window = [...recorded].sort((a, b) => b[1] - a[1])[0]?.[0];
+  const panes = live.filter(entry => entry.window === window).map(entry => entry.member.block);
+  if (!window || !panes.length) return { role: 'agents', mode: 'window', title };
+  // The tab is the same size as the tab it was opened from, so the parent pane
+  // is the frame both for choosing the grid and for repairing it after launch.
+  const frame = await client.size({ rexSession: run.rexSession, block: run.anchor }, signal);
+  signal?.throwIfAborted();
+  const plan = gridPlan(panes.length + 1, frame);
+  return { role: 'agents', mode: 'grid', window, anchor: panes[0], direction: 'right', rows: plan.rows, frame, title };
+}
+
+function jobsPlacement(run, live, panesPerTab, role) {
   const groups = new Map();
   const occupancy = new Map();
   let maxPage = 0;
-  for (const member of members) {
-    if (member.closed) continue;
-    if (!member.block) throw new Error(`Layout acquisition ${member.id} is unresolved; inspect Rex before launching more ${role}.`);
-    const actual = await inspectOrRetire(client, member, signal);
-    if (!actual) continue;
-    signal?.throwIfAborted();
+  for (const { member, window } of live) {
     maxPage = Math.max(maxPage, member.layout.page || 1);
-    occupancy.set(actual.window, (occupancy.get(actual.window) || 0) + 1);
-    // The user owns subsequent layout changes. Never move a block back or add
-    // companions beside it after it has left its original managed window.
-    if (actual.window !== member.layout.window) continue;
-    const group = groups.get(actual.window) || { page: member.layout.page, members: [] };
+    occupancy.set(window, (occupancy.get(window) || 0) + 1);
+    if (window !== member.layout.window) continue;
+    const group = groups.get(window) || { page: member.layout.page, members: [] };
     group.members.push(member);
-    groups.set(actual.window, group);
+    groups.set(window, group);
   }
   for (const [window, group] of [...groups].sort((a, b) => a[1].page - b[1].page)) {
     if (occupancy.get(window) < panesPerTab) return { role, mode: 'split', window, page: group.page,
       anchor: group.members[0].block, direction: 'right' };
   }
   const page = maxPage + 1;
-  const title = `${role === 'agents' ? 'Agents' : 'Jobs'}${page > 1 ? ` ${page}` : ''} · ${run.owner.slice(0, 8)}`;
-  return { role, mode: 'window', page, title };
+  return { role, mode: 'window', page, title: `Jobs${page > 1 ? ` ${page}` : ''} · ${run.owner.slice(0, 8)}` };
+}
+
+// Rex can only split the side of one pane at a time, so a grid is built by
+// detaching the group and placing the panes back in reading order. The newcomer
+// always takes the last cell, which keeps existing panes in their cells.
+async function placeTree(client, session, node, order, anchor, signal) {
+  if (!node || node.index !== undefined) return;
+  const block = order[firstLeafIndex(node.after)];
+  if (!block) throw new Error('Grid placement ran out of panes.');
+  await client.move(session, { block, anchor, direction: node.direction, ratio: node.ratio }, signal);
+  signal?.throwIfAborted();
+  await placeTree(client, session, node.after, order, block, signal);
+  await placeTree(client, session, node.before, order, anchor, signal);
+}
+
+// A pane that stays detached is invisible but still running, which loses a
+// child's pane without telling anyone. Put any straggler back beside the first
+// pane before reporting the failure.
+async function rescue(client, session, window, order) {
+  const placed = new Set(windowPanes(await client.view(session), window));
+  for (const block of order) {
+    if (placed.has(block)) continue;
+    await client.move(session, { block, anchor: order[0], direction: 'horizontal', ratio: 0.5 });
+  }
+}
+
+export async function applyGrid(client, run, signal) {
+  const layout = run.layout || {};
+  const session = run.rexSession, window = layout.window;
+  const seen = windowPanes(await client.view(session, signal), window);
+  // Nothing to arrange, or a tab that no longer holds the newcomer: leave a tab
+  // whose state we cannot read exactly as it is rather than rearranging it.
+  if (seen.length < 2 || !seen.includes(run.block)) return;
+  // The newcomer belongs in the last cell, so the panes that were already there
+  // keep their order and nothing appears to jump between launches.
+  const order = [...seen.filter(block => block !== run.block), run.block];
+  const rows = paneCount(layout.rows) === order.length ? layout.rows : gridPlan(order.length, layout.frame).rows;
+  try {
+    for (const block of order.slice(1)) await client.detach(session, block, signal);
+    signal?.throwIfAborted();
+    await placeTree(client, session, gridTree(rows), order, order[0], signal);
+  } catch (error) {
+    // Restoring stragglers must not depend on the signal that just cancelled us.
+    await rescue(client, session, window, order).catch(() => {});
+    throw error;
+  }
+  const after = windowPanes(await client.view(session, signal), window);
+  if (after.length !== order.length) {
+    throw new Error(`Grid placement left ${after.length} of ${order.length} panes in the tab.`);
+  }
 }

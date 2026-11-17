@@ -173,7 +173,7 @@ test('layout retires a missing direct Pi without an exit file and can launch aga
   const client = { inspect: async run => { throw Object.assign(new Error('missing'),
     { code: 'REX_BLOCK_NOT_FOUND', block: run.block, rexSession: run.rexSession }); } };
   const placement = await withLayoutLock(f.root, () => choosePlacement(f.root, client, { kind: 'agent', owner: 'parent', rexSession: f.run.rexSession }));
-  assert.equal(placement.mode, 'window'); assert.equal(placement.page, 1);
+  assert.equal(placement.mode, 'window'); assert.equal(placement.title, 'Agents · parent');
   assert.equal((await f.get('exit')).unknown, true); assert.equal((await f.get('run')).closed, true);
 });
 

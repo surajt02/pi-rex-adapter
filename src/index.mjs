@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { Rex, rexExecutable, atomicJson, readJson, listRuns, prepareRun,
   contextSnapshot, tailFile, runStatus, runStates } from './core.mjs';
 
-import { withLayoutLock, existingBtw, choosePlacement } from './layout.mjs';
+import { withLayoutLock, existingBtw, choosePlacement, applyGrid } from './layout.mjs';
 import { discoverRoles, findRole, applyRole, roleSummary } from './roles.mjs';
 import { MAX_STEPS, createChain, readChain, writeChain, chainSummary, composeTask, stepLabel, chainDirectory } from './chain.mjs';
 import { registerChild } from './child.mjs';
@@ -617,6 +617,13 @@ export default function adapter(pi, dependencies = {}) {
         if (!requested) run.closed = true;
       }
       await atomicJson(join(run.dir, 'run.json'), run);
+      // The pane exists and its record is already on disk, so a tab that could
+      // not be rearranged is reported and left alone rather than abandoning a
+      // child that is already running.
+      if (run.layout?.mode === 'grid' && run.block) {
+        try { await applyGrid(client, run, signal); }
+        catch (error) { if (epoch === generation && ctx.hasUI) ctx.ui.notify(ui('gridWarning', { message: error.message }), 'warning'); }
+      }
       if (epoch === generation) { tracked.set(run.id, run.dir); monitor(); void reconcile(); }
       return { id: run.id, block: run.block, window: run.window, status: run.status, error: run.error, artifacts: run.dir,
         note: run.status === 'uncertain' ? 'Inspect Rex before retrying; a process may already be running.' : 'Completion will be delivered automatically. Do not poll.' };

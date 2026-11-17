@@ -78,7 +78,7 @@ Both settings are optional:
 | Setting | Default | Behavior |
 | --- | --- | --- |
 | `language` | `"en"` | `"en"` or `"zh"`. Covers the **main agent's overview**, including titles, task states and counts, plus overlays, action feedback and child-session notices. |
-| `panesPerTab` | `2` | A positive integer limiting adapter-managed panes in each Agents or Jobs tab. Set `1` for a separate tab per task, or `3` to keep the first three tasks together and open a new page for the fourth. |
+| `panesPerTab` | `2` | A positive integer limiting adapter-managed panes in each **Jobs** tab. Set `1` for a separate job tab, or `3` to keep the first three jobs together and open a new page for the fourth. Agents ignore it: they all share one grid tab. |
 
 For example, `{"language":"zh"}` in the project file changes only the UI language. The pane limit still comes from the global configuration or its default.
 
@@ -86,7 +86,7 @@ Settings are read at startup, session switches, and `/reload`. No default file i
 
 Language settings leave task text, agent answers, logs, underlying errors, and structured status values intact. They do not set the model's response language. Tool names, slash commands, and their descriptions remain in English.
 
-The pane limit affects future launches only. Existing panes are not moved, resized, or closed. Splits are always horizontal: each new pane takes the right half of its target pane. The adapter does not rebalance the entire tab. BTW keeps its own reusable pane beside the parent, outside this limit. Manually added panes do not count toward it.
+The pane limit affects future jobs only. Existing job panes are not moved, resized, or closed, and their splits are always horizontal: each new job takes the right half of its target pane. Agent tabs are a grid and are rearranged on each launch, as described under workspace and layout. BTW keeps its own reusable pane beside the parent, outside this limit. Manually added panes do not count toward it.
 
 ## Side conversations
 
@@ -235,22 +235,27 @@ Inside Rex, launch tools and `rex_finish` are exposed directly by default. Diagn
 
 A **Rex session** groups the workspace. A **window/tab** groups attention. A **pane** is a position in that layout, while a terminal **block** hosts a process. A **Pi session** stores a conversation. Multiple Pi sessions can share a Rex workspace without sharing conversation context or isolating file changes.
 
-With the default `panesPerTab: 2`:
-
 ```text
 Current Rex session (selected by the user)
 ├─ Main tab: main Pi | BTW
-├─ Agents · <parent Pi ID>: agent 1 | agent 2
-├─ Agents 2 · <parent Pi ID>: agent 3 | agent 4
+├─ Agents · <parent Pi ID>: one grid tab holding every agent
+│    2 agents      3 agents      4 agents      5 agents
+│    ┌────┬────┐   ┌──┬──┬──┐    ┌────┬────┐   ┌────┬────┐
+│    │ 1  │ 2  │   │1 │2 │3 │    │ 1  │ 2  │   │ 1  │ 2  │
+│    └────┴────┘   └──┴──┴──┘    ├────┼────┤   ├────┼────┤
+│                                │ 3  │ 4  │   │3 │4 │5 │
+│                                └────┴────┘   └──┴──┴──┘
 └─ Jobs · <parent Pi ID>: build | test
 ```
 
-- All splits place the new pane on the right, taking 50% of the target pane. The adapter never switches to vertical stacking based on window size.
+- Agents never page into an `Agents 2` tab. One, two and three agents are columns; from four the tab becomes a grid of rows of equal panes, with the spare panes in the lower rows, so five reads as two above three. The grid is chosen from the tab's size in pixels, because a wide window wants wide rows and a square one wants square cells.
+- The agent tab is rearranged on each launch: panes are detached and placed back in reading order, so the newcomer takes the last cell and the panes already there keep their order. Panes resize whenever the grid shape changes; a crowded tab is read by zooming a single pane rather than by opening more tabs.
+- Jobs keep the paged behaviour below: each new job takes the right half of its target pane, up to `panesPerTab` per tab.
 - Agents and Jobs have separate groups, owned by a parent Pi session. Titles include a short parent ID. Different parents do not reuse one another's task panes. The main tab and Rex session are not renamed; Rex sessions are not automatically created.
-- Layout creation and closing are serialized per parent. Group membership is restored from task records after `/reload`.
+- Layout creation and closing are serialized per parent, and the grid rearrangement runs under the same lock. Group membership is restored from task records after `/reload`.
 - Shell blocks retained for undelivered results still occupy a slot. After delivery and cleanup, the remaining tab can accept another task. Only open records advance page numbers.
 - Empty tabs are not deleted automatically because users may have added content. Reused page numbers can therefore produce the same title as an older empty tab.
-- Blocks moved by the user stay where they are. A moved block is not reused as a split anchor outside its original managed window. Moving it does not change ownership, result delivery, or control permissions. Manually added panes do not count toward the configured limit and are not rearranged.
+- Blocks the user moves out of the Agents tab stay where they are and are not counted, so the grid is built from the panes still in that tab; it never grows beside a block the user moved away. Moving a block does not change ownership, result delivery, or control permissions. Manually added panes do not count toward the Job limit and are not rearranged.
 - When selecting a layout or reusing BTW, an exact Rex response that a direct Pi block is missing marks the task closed and allows creation to continue. If no exit code remains, the process outcome is explicitly unknown; existing answers are retained. Legacy runner tasks still require a valid exit record before automatic retirement. Connection failures, missing sessions, and uncertain creations stop creation in that group; manually verified removal can be recorded through the task manager's recovery action.
 
 `rex_tasks` separates `taskState`, `processState`, and `blockState`. An answered agent can be `completed / idle / open`; a finished shell job can be `completed / exited / open`. Task and process states come from the last activity and exit records. Block state comes from the current Rex inspection, or `unverified` if inspection fails. Confirmed closed records always report `closed`, including when a close races with inspection.

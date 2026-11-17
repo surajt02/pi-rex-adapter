@@ -17,6 +17,8 @@ function fakeRex() {
   const calls = [];
   let count = 0, windows = 0;
   return { blocks, calls,
+    // The tab an agent joins is the size of the tab it was opened from.
+    async size() { return { columns: 174, rows: 80, cellWidth: 16, cellHeight: 30 }; },
     async inspect(run) { if (!blocks.has(run.block)) throw new Error('Block unavailable'); return { window: blocks.get(run.block) }; },
     async open(run) {
       calls.push(structuredClone(run.layout));
@@ -43,14 +45,18 @@ async function create(root, client, kind = 'agent', owner = 'owner-123456') {
   });
 }
 
-test('concurrent agents fill two-pane groups; jobs and parent sessions have separate groups', async t => {
+test('agents share one grid tab; jobs keep a paged tab of their own', async t => {
   const root = await temp(t), client = fakeRex();
-  const agents = await Promise.all([create(root, client), create(root, client), create(root, client)]);
+  const agents = [];
+  for (let i = 0; i < 4; i++) agents.push(await create(root, client));
+  assert.equal(agents[0].layout.mode, 'window');
   assert.equal(agents[0].layout.title, 'Agents · owner-12');
-  assert.equal(agents[1].layout.mode, 'split');
-  assert.equal(agents[1].layout.direction, 'right');
-  assert.equal(agents[1].window, agents[0].window);
-  assert.equal(agents[2].layout.title, 'Agents 2 · owner-12');
+  // One, two and three agents are columns; the fourth turns the tab into a grid.
+  assert.deepEqual(agents.slice(1).map(a => a.layout.mode), ['grid', 'grid', 'grid']);
+  assert.deepEqual(agents.slice(1).map(a => a.layout.rows), [[2], [3], [2, 2]]);
+  assert.ok(agents.every(a => a.window === agents[0].window), 'every agent stays in the same tab');
+  assert.equal(agents[1].layout.anchor, agents[0].block);
+  assert.deepEqual(agents[1].layout.frame, { columns: 174, rows: 80, cellWidth: 16, cellHeight: 30 });
   const job = await create(root, client, 'shell');
   assert.equal(job.layout.title, 'Jobs · owner-12');
   assert.notEqual(job.window, agents[0].window);
@@ -59,16 +65,22 @@ test('concurrent agents fill two-pane groups; jobs and parent sessions have sepa
   assert.equal(other.layout.title, 'Agents · differen');
 });
 
-test('layout reconstructs from manifests and ignores manually moved blocks', async t => {
+test('a pane the user dragged elsewhere is never counted, moved back or grown beside', async t => {
   const root = await temp(t), client = fakeRex();
-  const first = await create(root, client);
-  client.blocks.set(first.block, 'user-tab');
-  const next = await create(root, client);
-  assert.equal(next.layout.mode, 'window');
-  assert.equal(client.blocks.get(first.block), 'user-tab');
+  const first = await create(root, client), second = await create(root, client);
+  client.blocks.set(second.block, 'user-tab');
   const third = await create(root, client);
-  assert.equal(third.layout.anchor, next.block);
-  assert.equal(third.window, next.window);
+  assert.equal(client.blocks.get(second.block), 'user-tab');
+  assert.equal(third.window, first.window);
+  // Only the pane still in the managed tab counts, so the grid stays at two.
+  assert.deepEqual(third.layout.rows, [2]);
+  // With nothing left there, a fresh Agents tab opens instead of growing the tab
+  // the user moved those panes to.
+  for (const run of [first, second, third]) client.blocks.set(run.block, 'user-tab');
+  const fourth = await create(root, client);
+  assert.equal(fourth.layout.mode, 'window');
+  assert.notEqual(fourth.window, 'user-tab');
+  for (const run of [first, second, third]) assert.equal(client.blocks.get(run.block), 'user-tab');
 });
 
 test('closed group member frees its position; exited retained logs still occupy a pane', async t => {
@@ -135,7 +147,11 @@ for (const kind of ['agent', 'shell', 'btw']) test(`${kind}: absent exited panes
   assert.deepEqual(await readJson(join(run.dir, 'exit.json')), exit);
   assert.equal(client.calls.some(c => c.action === 'close'), false);
   if (kind === 'btw') assert.equal(replacement.layout.anchor, 'parent');
-  else { assert.equal(replacement.layout.mode, 'window'); assert.equal(replacement.layout.page, 1); }
+  else {
+    assert.equal(replacement.layout.mode, 'window');
+    assert.equal(replacement.layout.title, kind === 'agent' ? 'Agents · owner-12' : 'Jobs · owner-12');
+    if (kind === 'shell') assert.equal(replacement.layout.page, 1);
+  }
 });
 
 for (const kind of ['agent', 'btw']) test(`${kind}: ambiguous failures and missing exit evidence remain blocking`, async t => {
@@ -168,8 +184,8 @@ test('retiring stale agent groups preserves failed/exited outcomes and concurren
   const inspect = client.inspect;
   client.inspect = async r => { if (!client.blocks.has(r.block)) throw missingBlock(r); return inspect(r); };
   const [a, b] = await Promise.all([create(root, client), create(root, client)]);
-  assert.equal(a.layout.page, 1); assert.equal(a.layout.mode, 'window');
-  assert.equal(b.layout.page, 1); assert.equal(b.layout.anchor, a.block);
+  assert.equal(a.layout.mode, 'window'); assert.equal(a.layout.title, 'Agents · owner-12');
+  assert.equal(b.layout.mode, 'grid'); assert.equal(b.layout.anchor, a.block); assert.deepEqual(b.layout.rows, [2]);
   for (let i = 0; i < runs.length; i++) {
     const r = await readJson(join(runs[i].dir, 'run.json'));
     assert.equal(r.closed, true); assert.equal(r.status, i === 0 ? 'exited' : 'failed');
@@ -208,6 +224,11 @@ test('window CLI has a group title, split targets exact owned block and preserve
   run.layout = { mode: 'split', anchor: 'exact', window: 'w', direction: 'right' };
   await client.open(run, '/runner');
   assert.deepEqual(calls[1].slice(0, 5), ['split', '-b', 'exact', '--split=right', '--ratio=50']);
+  // A grid pane is split into place first and rearranged afterwards.
+  run.layout = { mode: 'grid', anchor: 'exact', window: 'w', rows: [2], direction: 'right' };
+  await client.open(run, '/runner');
+  assert.deepEqual(calls[2].slice(0, 5), ['split', '-b', 'exact', '--split=right', '--ratio=50']);
+  assert.equal(run.window, 'w');
 });
 
 test('task completion, idle Pi, retained exited process and closed block remain distinct', () => {

@@ -66,6 +66,10 @@ function harness(dir, t) {
   const layouts = []; let serial = 0;
   const client = {
     inspect: async r => { assert.ok(blocks.has(r.block)); return { window: blocks.get(r.block) }; },
+    size: async () => ({ columns: 174, rows: 80, cellWidth: 16, cellHeight: 30 }),
+    view: async () => ({ windows: [] }),
+    detach: async () => ({}),
+    move: async () => ({}),
     open: async run => {
       const block = `b-${++serial}`;
       run.window = run.layout.window || `w-${serial}`; run.layout.window = run.window;
@@ -85,23 +89,29 @@ function harness(dir, t) {
       kind === 'bg_run' ? { command: task } : kind === 'subagent' ? { task, label: 'Delegated task' } : { task }, undefined, undefined, ctx) };
 }
 
-test('configured cap applies to agent and shell tabs, reload respects existing panes, BTW stays beside parent', async t => {
+test('agents never page into a second tab while shell jobs keep the configured cap', async t => {
   const dir = await temp(t); envFor(t, dir); await settings(dir, { panesPerTab: 3 });
   const h = harness(dir, t); await h.events.session_start({}, h.ctx);
-  for (const kind of ['subagent', 'bg_run']) {
-    const start = h.layouts.length;
-    for (let i = 0; i < 4; i++) assert.equal((await h.launch(kind, `task ${i}`)).isError, undefined);
-    const group = h.layouts.slice(start);
-    assert.deepEqual(group.map(x => x.mode), ['window', 'split', 'split', 'window']);
-    assert.ok(group.slice(1, 3).every(x => x.direction === 'right' && x.window === group[0].window));
-    assert.equal(group[3].page, 2);
-  }
+  let start = h.layouts.length;
+  for (let i = 0; i < 4; i++) assert.equal((await h.launch('subagent', `task ${i}`)).isError, undefined);
+  const agents = h.layouts.slice(start);
+  assert.deepEqual(agents.map(x => x.mode), ['window', 'grid', 'grid', 'grid']);
+  assert.ok(agents.slice(1).every(x => x.window === agents[0].window), 'one Agents tab, never a second');
+  assert.deepEqual(agents.slice(1).map(x => x.rows), [[2], [3], [2, 2]]);
+  start = h.layouts.length;
+  for (let i = 0; i < 4; i++) assert.equal((await h.launch('bg_run', `job ${i}`)).isError, undefined);
+  const jobs = h.layouts.slice(start);
+  assert.deepEqual(jobs.map(x => x.mode), ['window', 'split', 'split', 'window']);
+  assert.ok(jobs.slice(1, 3).every(x => x.direction === 'right' && x.window === jobs[0].window));
+  assert.equal(jobs[3].page, 2);
+  // Reloading never moves or resizes an existing tab, and agents still join theirs.
   const before = [...h.blocks];
   await settings(dir, { panesPerTab: 1 }); await h.events.session_start({}, h.ctx);
-  assert.deepEqual([...h.blocks], before); // No existing layout is moved or resized.
-  assert.equal((await h.launch('subagent', 'after reduction')).isError, undefined);
-  assert.equal(h.layouts.at(-1).mode, 'window');
-  assert.equal(h.layouts.at(-1).page, 3);
+  assert.deepEqual([...h.blocks], before);
+  assert.equal((await h.launch('subagent', 'after reload')).isError, undefined);
+  assert.equal(h.layouts.at(-1).mode, 'grid');
+  assert.equal(h.layouts.at(-1).window, agents[0].window);
+  assert.deepEqual(h.layouts.at(-1).rows, [2, 3]);
   assert.equal((await h.launch('btw', 'side question')).isError, undefined);
   assert.equal(h.layouts.at(-1).mode, 'split'); assert.equal(h.layouts.at(-1).anchor, 'parent');
 });
