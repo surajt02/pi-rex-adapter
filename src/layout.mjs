@@ -1,7 +1,7 @@
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { atomicJson, listRuns, readJson, runStatus } from './core.mjs';
-import { firstLeafIndex, gridPlan, gridTree, paneCount, windowPanes } from './grid.mjs';
+import { firstLeafIndex, floatingLayers, gridPlan, gridTree, layerTakesSlot, paneCount, windowOf, windowPanes } from './grid.mjs';
 
 export { withLayoutLock } from './core.mjs';
 import { missingBlock, recordLifecycle } from './lifecycle.mjs';
@@ -124,16 +124,25 @@ const CHIP_SLOTS = Object.freeze([
 async function chipPlacement(run, live, client, signal) {
   const taken = new Set(live.filter(entry => entry.member.layout?.mode === 'chip')
     .map(entry => entry.member.layout.slot).filter(slot => Number.isInteger(slot)));
-  const free = CHIP_SLOTS.findIndex((_, index) => !taken.has(index));
-  const slot = free === -1 ? taken.size % CHIP_SLOTS.length : free;
-  const placement = { role: 'jobs', mode: 'chip', anchor: run.anchor, slot, bounds: CHIP_SLOTS[slot] };
+  const placement = { role: 'jobs', mode: 'chip', anchor: run.anchor, slot: 0, bounds: CHIP_SLOTS[0] };
   // The chip belongs to the window the parent pane is in, which the layer has to
   // be told up front. Without it the server would use the active window, which
   // is usually the same one; an unreachable parent is reported by the launch.
   try {
-    const anchor = await client.inspect({ rexSession: run.rexSession, block: run.anchor }, signal);
-    if (anchor?.window) placement.window = anchor.window;
+    const view = await client.view(run.rexSession, signal);
+    const window = windowOf(view, run.anchor);
+    if (window) {
+      placement.window = window;
+      // Count every floating layer in that window, not only this parent's chips:
+      // another Pi may already have a chip sitting on one of these slots.
+      for (const layer of floatingLayers(view, window)) {
+        CHIP_SLOTS.forEach((slot, index) => { if (layerTakesSlot(layer.bounds, slot)) taken.add(index); });
+      }
+    }
   } catch (error) { if (signal?.aborted) throw error; }
+  const free = CHIP_SLOTS.findIndex((_, index) => !taken.has(index));
+  placement.slot = free === -1 ? taken.size % CHIP_SLOTS.length : free;
+  placement.bounds = CHIP_SLOTS[placement.slot];
   return placement;
 }
 
@@ -178,7 +187,14 @@ async function rescue(client, session, window, order) {
 export async function applyGrid(client, run, signal) {
   const layout = run.layout || {};
   const session = run.rexSession, window = layout.window;
-  const seen = windowPanes(await client.view(session, signal), window);
+  const view = await client.view(session, signal);
+  const all = windowPanes(view, window);
+  const mine = await ownBlocks(run);
+  // Another Pi can put panes in the same tab. The grid's shape is defined over
+  // the whole tab, so rearranging ours around theirs would either move a pane we
+  // do not own or misdescribe the tab; the provisional split is left in place.
+  if (all.some(block => !mine.has(block))) return;
+  const seen = all;
   // Nothing to arrange, or a tab that no longer holds the newcomer: leave a tab
   // whose state we cannot read exactly as it is rather than rearranging it.
   if (seen.length < 2 || !seen.includes(run.block)) return;
@@ -195,8 +211,19 @@ export async function applyGrid(client, run, signal) {
     await rescue(client, session, window, order).catch(() => {});
     throw error;
   }
-  const after = windowPanes(await client.view(session, signal), window);
+  const after = windowPanes(await client.view(session, signal), window).filter(block => mine.has(block));
   if (after.length !== order.length) {
     throw new Error(`Grid placement left ${after.length} of ${order.length} panes in the tab.`);
   }
+}
+
+// The agent panes this parent owns, from its own records. Anything else in the
+// tab belongs to another Pi session and is never counted or moved.
+async function ownBlocks(run) {
+  const mine = new Set([run.block]);
+  for (const record of await listRuns(dirname(run.dir))) {
+    if (record.closed || record.layout?.role !== 'agents' || !record.block) continue;
+    mine.add(record.block);
+  }
+  return mine;
 }

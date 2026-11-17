@@ -98,3 +98,31 @@ export function windowPanes(view, windowId) {
   walk(layer?.layout);
   return order;
 }
+
+// Reading a window's floating layers lets a chip avoid another parent's chip
+// that happens to sit at the same bounds.
+export function floatingLayers(view, windowId) {
+  const window = (view?.windows || []).find(w => w?.window_id === windowId);
+  return (window?.layers || []).filter(layer => layer?.kind === 'floating' && Array.isArray(layer.bounds))
+    .map(layer => ({ layer: layer.layer_id, state: layer.state || 'normal', bounds: layer.bounds }));
+}
+
+// The window a block is in right now, which is how a chip finds the window of
+// the pane it belongs beside without trusting a recorded value.
+export function windowOf(view, block) {
+  for (const window of view?.windows || []) {
+    for (const layer of window?.layers || []) {
+      for (const entry of layer?.blocks || []) if (entry?.block_id === block) return window.window_id;
+    }
+  }
+  return undefined;
+}
+
+// A slot is taken when a layer overlaps it at all: a chip the user moved or
+// resized still reserves the space it covers, not just its original rectangle.
+export function layerTakesSlot(bounds, slot, epsilon = 1e-6) {
+  if (!Array.isArray(bounds) || bounds.length !== 4 || bounds.some(value => !Number.isFinite(value))) return false;
+  const [x, y, w, h] = bounds, [sx, sy, sw, sh] = slot;
+  return Math.min(x + w, sx + sw) - Math.max(x, sx) > epsilon
+    && Math.min(y + h, sy + sh) - Math.max(y, sy) > epsilon;
+}

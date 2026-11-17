@@ -12,7 +12,7 @@ async function temp(t) {
   const dir = await mkdtemp(join(tmpdir(), 'pi-rex-layout-'));
   t.after(() => rm(dir, { recursive: true, force: true })); return dir;
 }
-function fakeRex() {
+function fakeRex({ floating = [] } = {}) {
   const blocks = new Map([['parent', 'main']]);
   const calls = [];
   let count = 0, windows = 0;
@@ -20,6 +20,18 @@ function fakeRex() {
     // The tab an agent joins is the size of the tab it was opened from.
     async size() { return { columns: 174, rows: 80, cellWidth: 16, cellHeight: 30 }; },
     async inspect(run) { if (!blocks.has(run.block)) throw new Error('Block unavailable'); return { window: blocks.get(run.block) }; },
+    // The real view reports every layer, including floating chips from any parent.
+    async view() {
+      const groups = new Map();
+      for (const [block, window] of blocks) groups.set(window, [...(groups.get(window) || []), block]);
+      return { windows: [...groups].map(([window_id, list]) => ({ window_id, layers: [
+        { kind: 'tiled', layout: list.length === 1 ? { block_id: list[0] } : { block_id: list[0] },
+          blocks: list.map(block => ({ block_id: block })) },
+        ...floating.filter(layer => layer.window === window_id)
+          .map(layer => ({ kind: 'floating', layer_id: layer.layer, state: layer.state || 'minimized',
+            bounds: layer.bounds, blocks: [{ block_id: layer.block }] })),
+      ] })) };
+    },
     async open(run) {
       calls.push(structuredClone(run.layout));
       const id = `block-${++count}`;
@@ -322,10 +334,30 @@ test('each job takes its own chip slot and a closed job frees that slot again', 
   // Every chip belongs to the window the parent pane is in, beside that pane.
   assert.ok(jobs.every(job => job.layout.anchor === 'parent'));
   assert.ok(jobs.every(job => job.layout.window === 'main'));
+  // No floating layers yet, so the slots come from this parent's own records.
+  assert.deepEqual(jobs.map(job => job.layout.bounds), [[0.54, 0.04, 0.44, 0.3], [0.54, 0.36, 0.44, 0.3],
+    [0.54, 0.68, 0.44, 0.3], [0.54, 0.04, 0.44, 0.3]]);
   const spare = jobs[1];
   spare.closed = true; await atomicJson(join(spare.dir, 'run.json'), spare); client.blocks.delete(spare.block);
   const next = await create(root, client, 'shell');
   assert.equal(next.layout.slot, 1);
+});
+
+test("a slot already holding another parent's chip is skipped", async t => {
+  const root = await temp(t);
+  // Another Pi's chip sits on slot 0 in the same window; this parent has no
+  // record of it, so only the window's own layers can tell us it is there.
+  const client = fakeRex({ floating: [{ window: 'main', layer: 'layer-other', block: 'other-chip',
+    bounds: [0.54, 0.04, 0.44, 0.3] }] });
+  const first = await create(root, client, 'shell');
+  assert.equal(first.layout.slot, 1);
+  assert.deepEqual(first.layout.bounds, [0.54, 0.36, 0.44, 0.3]);
+  // A chip this parent moved out of its slot stops reserving it.
+  const elsewhere = await temp(t);
+  const moved = fakeRex({ floating: [{ window: 'main', layer: 'layer-other', block: 'other-chip',
+    bounds: [0.05, 0.7, 0.3, 0.2] }] });
+  const second = await create(elsewhere, moved, 'shell');
+  assert.equal(second.layout.slot, 0);
 });
 
 test('a chip born in its layer is only minimized, never floated', async t => {
