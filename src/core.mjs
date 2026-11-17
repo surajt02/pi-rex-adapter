@@ -115,6 +115,17 @@ export class Rex {
   async minimize(session, layer, signal) {
     return this.api('session.set_layer_state', { session_id: session, layer_id: layer, state: 'minimized' }, signal);
   }
+  // Focusing a pane in another window changes the session's active window, but
+  // only the app can change which tab it is showing. Asking it to select that
+  // window first is what makes the click visible instead of silent.
+  async reveal(session, window, signal) {
+    const list = await this.api('client.list', { kinds: ['app'] }, signal);
+    const app = (list?.clients || []).find(client => client?.client_id);
+    if (!app) return false;
+    await this.api('client.perform', { client_id: app.client_id, action: 'session.select', origin: 'api',
+      args: { session_id: session, window_id: window } }, signal);
+    return true;
+  }
   async move(session, { block, anchor, direction, ratio }, signal) {
     return this.api('session.move_block', { session_id: session, block_id: block,
       anchor_block_id: anchor, direction, ratio, side: 'after' }, signal);

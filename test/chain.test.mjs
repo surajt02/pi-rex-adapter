@@ -28,6 +28,7 @@ function fakeRex() {
     },
     async inspect(run) { calls.inspect.push(run.block); return { window: `window-${blocks}` }; },
     async control(run, action) { calls.control.push({ id: run.id, action }); },
+    async reveal() { return true; },
     events() { return () => {}; },
   };
 }

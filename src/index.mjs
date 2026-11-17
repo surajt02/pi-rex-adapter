@@ -6,6 +6,7 @@ import { Rex, rexExecutable, atomicJson, readJson, listRuns, prepareRun,
   contextSnapshot, tailFile, runStatus, runStates } from './core.mjs';
 
 import { withLayoutLock, existingBtw, choosePlacement, applyGrid, applyChip } from './layout.mjs';
+import { windowOf } from './grid.mjs';
 import { discoverRoles, findRole, applyRole, roleSummary } from './roles.mjs';
 import { MAX_STEPS, createChain, readChain, writeChain, chainSummary, composeTask, stepLabel, chainDirectory } from './chain.mjs';
 import { registerChild } from './child.mjs';
@@ -115,6 +116,18 @@ export default function adapter(pi, dependencies = {}) {
   // purpose: no transcript entry, no notification when it works, because the
   // reader's proof is Rex switching panes. A failure does have to speak, or the
   // click looks swallowed.
+  // A click has to move the reader's screen, not only the server's idea of the
+  // active window. The app changes tabs only when a client action asks it to, so
+  // the pane's window is selected first. Best effort: an app that refuses actions
+  // (Remote Control off) is left to the server-side focus alone.
+  async function reveal(run, signal) {
+    if (!run.block) return;
+    try {
+      const client = await rex();
+      const window = windowOf(await client.view(run.rexSession, signal), run.block);
+      if (window) await client.reveal(run.rexSession, window, signal);
+    } catch (error) { if (signal?.aborted) throw error; }
+  }
   function focusFromWidget(ctx, id) {
     const epoch = generation;
     control(id, 'focus').catch(error => {
@@ -659,6 +672,7 @@ export default function adapter(pi, dependencies = {}) {
     if (action !== 'close' && action !== 'finish') {
       const run = await owned(id);
       if (action === 'interrupt' && run.kind === 'shell') throw new Error('Use close/bg_kill to stop a shell task; Escape only interrupts Pi turns.');
+      if (action === 'focus') await reveal(run, signal);
       signal.throwIfAborted();
       await (await rex()).control(run, action, signal);
       const states = await taskStates(run);

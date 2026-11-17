@@ -19,7 +19,14 @@ async function fixture(t, control) {
     registerTool: tool => { tools[tool.name] = tool; },
     appendEntry: (customType, data) => entries.push({ type: 'custom', customType, data }),
     sendMessage: message => { messages.push(message); entries.push({ type: 'custom_message', ...message }); },
-  }, { cleanupRetryMs: 100, rex: { control: async (...args) => { calls.push(args); return control?.(...args); }, inspect: async () => ({ window: 'window' }) } });
+  }, { cleanupRetryMs: 100, rex: {
+    control: async (...args) => { calls.push(args); return control?.(...args); },
+    inspect: async () => ({ window: 'window' }),
+    // The app has to be asked to show the pane's window, not only the server.
+    view: async () => ({ windows: [{ window_id: 'window', layers: [{ kind: 'tiled',
+      blocks: ['agent-block', 'shell-block'].map(block_id => ({ block_id })) }] }] }),
+    reveal: async (...args) => { calls.push(['reveal', ...args]); return true; },
+  } });
   const root = join(dir, 'rex-adapter', 'parent');
   const boundary = () => events.turn_end({ entries: [], context: { canContinue: true }, outcome: 'completed' }, ctx);
   t.after(async () => { events.session_shutdown(); await rm(dir, { recursive: true, force: true }); });
@@ -400,11 +407,28 @@ test('a click on a row focuses that pane; a press alone, a right-click, and empt
   assert.deepEqual(component.handleMouse(event({ type: 'press', y: 0 })), { handled: true });
   assert.equal(h.calls.length, 0, 'claiming the press does not move focus');
   assert.deepEqual(component.handleMouse(event({ type: 'click', y: 0 })), { handled: true, render: true });
-  await until(() => h.calls.length > 0);
-  assert.equal(h.calls[0][1], 'focus');
-  assert.equal(h.calls[0][0].block, run.block);
+  await until(() => h.calls.some(call => call[1] === 'focus'));
+  const focused = h.calls.filter(call => call[1] === 'focus');
+  assert.equal(focused[0][0].block, run.block);
   assert.equal(component.handleMouse(event({ type: 'click', y: 0, button: 'right' })), undefined);
   assert.equal(component.handleMouse(event({ type: 'press', y: 1 })), undefined, 'below the last row is not ours');
+});
+
+test('a click asks the app to show the pane\'s tab, then focuses it', async t => {
+  const h = await fixture(t), run = await task(h.root, 'agent', 'running');
+  await h.events.session_start({}, h.ctx); await h.boundary();
+  const component = h.widgets.at(-1)[1]({ requestRender() {}, terminal: { rows: 24 } }, {});
+  component.render(100);
+  component.handleMouse({ type: 'press', button: 'left', x: 5, y: 0, width: 100, height: 1 });
+  component.handleMouse({ type: 'click', button: 'left', x: 5, y: 0, width: 100, height: 1 });
+  await until(() => h.calls.some(call => call[1] === 'focus'));
+  const reveal = h.calls.findIndex(call => call[0] === 'reveal');
+  const focus = h.calls.findIndex(call => call[1] === 'focus');
+  assert.ok(reveal >= 0 && reveal < focus, `reveal must come before focus: ${JSON.stringify(h.calls)}`);
+  // The fixture's runs carry no rex session, so only the window matters here.
+  assert.equal(h.calls[reveal][0], 'reveal');
+  assert.equal(h.calls[reveal][2], 'window');
+  assert.equal(h.calls[focus][0].block, run.block);
 });
 
 test('each row keeps its own target, so a click lands on the row under the cursor', async t => {
@@ -419,8 +443,8 @@ test('each row keeps its own target, so a click lands on the row under the curso
   assert.equal(lines.length, 2);
   const click = y => component.handleMouse({ type: 'click', button: 'left', x: 5, y, width: 100, height: lines.length });
   click(0); click(1);
-  await until(() => h.calls.length >= 2);
-  const focused = h.calls.map(call => call[0].block);
+  await until(() => h.calls.filter(call => call[1] === 'focus').length >= 2);
+  const focused = h.calls.filter(call => call[1] === 'focus').map(call => call[0].block);
   assert.deepEqual(new Set(focused), new Set([first.block, second.block]), 'two rows, two panes');
   assert.equal(new Set(focused).size, 2, 'the second row did not repeat the first row\'s target');
 });

@@ -21,6 +21,7 @@ const rex = {
   async open(run) { return \`block-\${++blocks}\`; },
   async inspect() { return { window: 'window-1' }; },
   async control() { return {}; },
+  async reveal() { return true; },
   events() { return () => {}; },
 };
 const events = {}, tools = [], entries = [];

@@ -40,6 +40,7 @@ function fakeRex({ floating = [] } = {}) {
       blocks.set(id, run.window); return id;
     },
     async control(run, action) { calls.push({ action, block: run.block }); if (action === 'close') blocks.delete(run.block); },
+    async reveal(session, window) { calls.push({ action: 'reveal', window, session }); return true; },
   };
 }
 function missingBlock(run) {
