@@ -178,6 +178,12 @@ export class Rex {
     });
     return () => { stopped = true; lines.close(); child.kill(); };
   }
+  // A promoted side conversation keeps its block, so only its label changes.
+  async rename(manifest, label, signal) {
+    signal?.throwIfAborted();
+    if (!manifest.block) throw new Error('Block identity unknown; inspect Rex before retrying.');
+    return this.run(this.binary, ['block', 'rename', '-s', manifest.rexSession, manifest.block, label], signal);
+  }
   async control(manifest, action, signal) {
     signal?.throwIfAborted();
     if (!manifest.block) throw new Error('Block identity unknown; inspect Rex before retrying.');

@@ -53,6 +53,7 @@ Parent and child processes must share the same machine and filesystem. Remote Re
 | --- | --- |
 | `/btw <question>` | Opens a side conversation, or picks an open one to send the question to |
 | `/btw` | Focuses an open side conversation, picking which one when several are open |
+| `/promote [note]` | Inside a side conversation: turns it into a full session in the same pane |
 | `/rex-agent <task>` | Starts an interactive Pi subagent in an Agents tab |
 | `/bg <command>` | Starts a background shell job as a minimized chip |
 | `/rex-tasks` | Opens the task manager overlay |
@@ -115,6 +116,21 @@ Without arguments, it returns the last assistant answer. With arguments, it retu
 
 BTW enables only `read,grep,find,ls` by default and disables MCP. This is a tool selection, not a security sandbox. Files are not automatically merged. To change the existing conversation's `cwd` or model, close it before creating another. A normally exited but retained BTW block is closed and replaced when a new question is submitted.
 
+### Promoting a side conversation
+
+When a side conversation has found the answer and you want it to *act*, type `/promote` **inside that pane**. Nothing is closed, moved or relaunched: the same block, the same Pi process and the same transcript simply stop being a side conversation and become a session.
+
+```text
+/promote
+/promote Fix the redirect and run the failing test
+```
+
+The command switches on the tools your main pane has — the list is recorded when the side conversation opens, so it means *this Pi's* loadout rather than everything Pi ships. It then marks the run a session, changes the pane label to `Pi · <name>`, and refreshes the pane's own header. The conversation already remembers the question, the files it read and its reasoning, so there is nothing to re-explain. Bare `/promote` leaves it idle with your cursor in it; with arguments, that text is sent as the first message of the session, unexpanded, so text starting with `/` is not run as a command.
+
+Promotion is refused while an answer is still arriving, because the tool set would change under a turn already in flight. It happens at most once: the pane's own `/btw-return` then refuses, the `/btw` picker stops offering it, the main-page overview never counts it as work, and `rex_finish` will not close it — it is a conversation you drive, closed like any other pane. It is also user-only by construction: the command exists in the child Pi, and the `btw` tool never promotes, so no model can grant itself tools.
+
+Two consequences worth knowing. The process keeps the MCP setting it started with, so a promoted side conversation has no MCP tools even if the parent does; side conversations are launched with `--no-mcp`, so restart that pane from `/rex-agent` if you ever need them. And the opening line of the transcript still reads like a side conversation; it stays as history, and nothing rewrites the transcript.
+
 ## Interactive subagents
 
 Subagents launch with Pi's `--approve` flag, trusting project-local files for that run so a new `cwd` does not wait for a folder-trust prompt. This includes project configuration and extensions; it does not save a permanent trust decision. The flag applies to delegated agents started through `subagent` or `/rex-agent`.
@@ -123,7 +139,7 @@ Subagents launch with Pi's `--approve` flag, trusting project-local files for th
 
 New agent sessions are named `Agent · <name>`, which Pi includes in its terminal title. A single muted line shows the original assignment above the editor; the footer distinguishes starting, running, failed, interrupted, and “Result queued · awaiting parent review”. Queued means the report has been written for the parent, not that the parent has already received or reviewed it. These hints follow the configured UI language and never append messages to the conversation. Pi 1.4's own program-status reporter continues to handle Rex working/blocked/done/error states; the adapter does not override it or add a status polling loop.
 
-After reviewing a completed handoff, the main agent should promptly call `rex_finish` unless it needs another turn from that agent. Files, results, and Pi session records remain available after closing, so the parent's integration or testing can continue afterward; there is no need to keep the pane open until the overall task ends. This is a tool/notification instruction, not enforced automatic closure or a repeated reminder. The tool requires a completed task with an idle or exited process. It will not finish an active task or a BTW conversation. Failed or interrupted tasks stay available for diagnosis or follow-up; after reviewing them, use `rex_control({id, action: "close"})` to explicitly close them. Closing is a main-agent action, not a child that exits itself.
+After reviewing a completed handoff, the main agent should promptly call `rex_finish` unless it needs another turn from that agent. Files, results, and Pi session records remain available after closing, so the parent's integration or testing can continue afterward; there is no need to keep the pane open until the overall task ends. This is a tool/notification instruction, not enforced automatic closure or a repeated reminder. The tool requires a completed task with an idle or exited process. It will not finish an active task, a BTW conversation, or a promoted session. Failed or interrupted tasks stay available for diagnosis or follow-up; after reviewing them, use `rex_control({id, action: "close"})` to explicitly close them. Closing is a main-agent action, not a child that exits itself.
 
 Child sessions do not register this adapter's delegation tools. Tasks share a working directory unless the main agent supplies another `cwd`. For parallel writers, prepare separate checkouts and pass their paths explicitly. The adapter does not create worktrees or manage role packs, model fallbacks, or persistent specialists.
 
@@ -326,10 +342,11 @@ A real Rex shell smoke test verifies the command header, title, native working/d
 5. Finish several jobs together: receive a batch instead of a separate model turn for every result.
 6. Launch four agents, then three shell jobs: verify the agents form columns and then a 2x2 grid in one tab, while every job becomes its own minimized chip and the parent pane is unchanged.
 7. Ask another BTW question: verify that the picker lists the open side conversation and **＋ New side conversation**, that the question arrives in the same conversation, that `ctrl+n` in the picker splits a second pane, and that bare `/btw` picks which pane to focus.
-8. Verify that finishing an idle agent preserves its result and that its task, process, and block states remain distinct.
-9. Check that finished tasks leave the overview but remain in history. Shell panes close after delivery; agents wait for the main agent to finish them.
-10. Click a job's overview row while its chip is minimized: verify the chip pops open at its slot and the click never terminates the job.
-11. Change the UI language, then reload: verify the main overview and future launches while preserving existing layouts.
+8. Inside a side conversation, run `/promote`: verify that the pane does not move, split or close, that its label becomes `Pi · <topic>`, and that `edit`, `write` and `bash` now work there. Try it while an answer is streaming and verify it refuses until the turn settles.
+9. Verify that finishing an idle agent preserves its result and that its task, process, and block states remain distinct.
+10. Check that finished tasks leave the overview but remain in history. Shell panes close after delivery; agents wait for the main agent to finish them.
+11. Click a job's overview row while its chip is minimized: verify the chip pops open at its slot and the click never terminates the job.
+12. Change the UI language, then reload: verify the main overview and future launches while preserving existing layouts.
 
 ## Publishing releases
 

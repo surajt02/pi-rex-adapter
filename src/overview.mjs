@@ -28,7 +28,7 @@ export function taskRow(run, exit, result, activity, language = 'en') {
     ...runStates(run, exit, result, activity), closed: Boolean(run.closed),
     summary: result?.text || (exit ? t(language, 'noSummary') : undefined), resultAvailable: Boolean(result), error: exit?.error || run.error, exitCode: exit?.code };
 }
-const kinds = { agent: 'Agent', shell: 'Shell', btw: 'BTW' };
+const kinds = { agent: 'Agent', shell: 'Shell', btw: 'BTW', session: 'Session' };
 export function rowLabel(row, language = 'en') {
   const process = row.closed ? t(language, 'closed') : row.processState === 'idle' ? t(language, 'idle')
     : row.processState === 'exited' ? t(language, 'processExited') : row.processState === 'unknown' ? t(language, 'processUnknown') : '';
@@ -60,6 +60,9 @@ export function btwRowParts(pane, language = 'en', now = Date.now()) {
 }
 function rank(row) {
   if (row.closed) return 3;
+  // A session is a conversation you drive, so it never outranks work that needs
+  // attention in the task list even though its process is always running.
+  if (row.kind === 'session') return 2;
   if (['running', 'launching', 'uncertain'].includes(row.taskState)) return 0;
   return row.taskState === 'failed' ? 1 : 2;
 }
@@ -67,14 +70,16 @@ export function orderRows(rows) {
   return [...rows].sort((a, b) => rank(a) - rank(b) || String(b.createdAt).localeCompare(String(a.createdAt)) || a.id.localeCompare(b.id));
 }
 export function activeOverviewRows(rows) {
-  return orderRows(rows.filter(row => row.kind !== 'btw' && !row.closed &&
+  return orderRows(rows.filter(row => row.kind !== 'btw' && row.kind !== 'session' && !row.closed &&
     ['running', 'launching', 'uncertain'].includes(row.taskState)));
 }
 // The list shows every task whose pane is still open, not only the running ones:
 // a completed agent awaiting rex_finish and a stuck or failed pane are exactly
-// what the reader needs to see. BTW lives in its own split, never here.
+// what the reader needs to see. BTW lives in its own split, never here; a
+// promoted session is a conversation the reader drives, so it stays out of the
+// widget too and is found in /rex-tasks instead.
 export function visibleRows(rows) {
-  return orderRows(rows.filter(row => row.kind !== 'btw' && !row.closed));
+  return orderRows(rows.filter(row => row.kind !== 'btw' && row.kind !== 'session' && !row.closed));
 }
 // Desaturated slate blue (#7e98ad); Theme.style handles truecolor/256-color.
 export function softBlue(theme, text) {

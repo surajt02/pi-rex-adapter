@@ -7,6 +7,10 @@ import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
 import { fit, softBlue } from './overview.mjs';
 
+// The tools a promoted session gets when the parent recorded no loadout, as for
+// a side conversation opened before promotion existed.
+const DEFAULT_PROMOTE_TOOLS = ['read', 'write', 'edit', 'bash', 'grep', 'find', 'ls'];
+
 export function registerChild(pi, dir) {
   let context, watcher, timer, reading = false, ready = false, generation = 0, attempt, noticeTimer, lastSequence = 0;
   let language = 'en';
@@ -16,8 +20,9 @@ export function registerChild(pi, dir) {
   const activity = (task, process) => atomicJson(join(dir, 'activity.json'), { task, process, at: new Date().toISOString() });
   function showState(state) {
     if (!context?.hasUI || !assignment) return;
-    const kind = assignment.kind === 'btw' ? 'BTW' : 'Agent';
-    const key = state === 'completed' ? (assignment.kind === 'btw' ? 'childBtwDone' : 'childAgentDone')
+    const kind = assignment.kind === 'session' ? 'Session' : assignment.kind === 'btw' ? 'BTW' : 'Agent';
+    const key = state === 'completed'
+      ? (assignment.kind === 'btw' ? 'childBtwDone' : assignment.kind === 'session' ? 'childSessionDone' : 'childAgentDone')
       : state === 'returned' ? 'childReturned' : state;
     const text = `${kind} · ${ui(key)}`;
     if (text === childStatus) return;
@@ -26,7 +31,8 @@ export function registerChild(pi, dir) {
   }
   function showAssignment(ctx) {
     if (!ctx.hasUI || !assignment) return;
-    const label = ui(assignment.kind === 'btw' ? 'childTopic' : 'childAssignment', { task: fit(assignment.task, 240) });
+    const key = assignment.kind === 'btw' ? 'childTopic' : assignment.kind === 'session' ? 'childSession' : 'childAssignment';
+    const label = ui(key, { task: fit(assignment.task, 240) });
     ctx.ui.setWidget?.('rex-assignment', (_tui, theme) => ({
       render: width => width > 0 ? [softBlue(theme, fit(label, width))] : [], invalidate() {},
     }), { placement: 'aboveEditor' });
@@ -106,7 +112,7 @@ export function registerChild(pi, dir) {
     const result = await readJson(join(dir, 'result.json'));
     if (epoch !== generation) return;
     lastSequence = result?.sequence || 0;
-    assignment = ['agent', 'btw'].includes(run?.kind) ? run : undefined;
+    assignment = ['agent', 'btw', 'session'].includes(run?.kind) ? run : undefined;
     showAssignment(ctx);
     showState(!ready ? 'launching' : !ctx.isIdle() ? 'running' : result?.status || 'idle');
     if (run && run.inputProtocol !== 1) { run.inputProtocol = 1; await atomicJson(join(dir, 'run.json'), run); }
@@ -146,6 +152,39 @@ export function registerChild(pi, dir) {
       await atomicJson(join(dir, `return-${randomUUID()}.json`), { text, status: 'returned', ...stamp() });
       if (epoch === generation) showState('returned');
       ctx.ui.notify(ui('returned'), 'info');
+    },
+  });
+  // Promotion is typed by the person sitting in this pane, never called by a
+  // model, so no agent can grant itself tools. It is the same process, the same
+  // block and the same transcript: only the tool set and the record's kind
+  // change, which is why no pane is opened or closed here.
+  pi.registerCommand('promote', {
+    description: 'Turn this side conversation into a full session with every tool',
+    handler: async (args, ctx) => {
+      const run = await readJson(join(dir, 'run.json'));
+      if (run?.kind !== 'btw') return ctx.ui.notify(ui('promoteOnly'), 'warning');
+      // Mid-answer promotion would swap the tools under a turn already running.
+      if (!ctx.isIdle()) return ctx.ui.notify(ui('promoteBusy'), 'warning');
+      const known = new Set((pi.getAllTools?.() ?? []).filter(tool => tool.exposure !== 'hidden').map(tool => tool.name));
+      const registered = names => known.size ? names.filter(name => known.has(name)) : names;
+      const requested = Array.isArray(run.promoteTools) && run.promoteTools.length ? run.promoteTools : DEFAULT_PROMOTE_TOOLS;
+      const enabled = registered(requested);
+      // Never leave the pane without a tool: a parent that recorded nothing this
+      // process has keeps the core set instead of switching everything off.
+      const wanted = enabled.length ? enabled : registered(DEFAULT_PROMOTE_TOOLS);
+      pi.setActiveTools?.(wanted);
+      const promoted = { ...run, kind: 'session', promotedAt: new Date().toISOString(), promotedTools: wanted };
+      await atomicJson(join(dir, 'run.json'), promoted);
+      // The parent owns Rex and the pane label; this note is its one instruction.
+      await atomicJson(join(dir, `promote-${randomUUID()}.json`),
+        { id: run.id, name: run.name, tools: wanted, requestedAt: promoted.promotedAt, status: 'promoted' });
+      assignment = promoted; childStatus = undefined;
+      showAssignment(ctx); showState('idle');
+      const note = String(args ?? '').trim();
+      // A note is the first message of the session; expandPromptTemplates stays off
+      // so text beginning with "/" is not run as a command.
+      if (note) pi.sendUserMessage(note, { expandPromptTemplates: false });
+      ctx.ui.notify(ui(note ? 'promotedNote' : 'promotedIdle'), 'info');
     },
   });
 }

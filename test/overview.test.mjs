@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import adapter from '../src/index.mjs';
 import { prepareRun, atomicJson, readJson } from '../src/core.mjs';
-import { overviewLines, buildGroups, fit, focusTarget, orderRows, activeOverviewRows, visibleRows, MAX_ROWS, FRAME_MS } from '../src/overview.mjs';
+import { overviewLines, buildGroups, fit, focusTarget, orderRows, activeOverviewRows, visibleRows, rowLabel, MAX_ROWS, FRAME_MS } from '../src/overview.mjs';
 import { measure } from '../src/columns.mjs';
 
 async function fixture(t, control) {
@@ -187,11 +187,12 @@ test('BTW and failed tasks never acquire a delivery/close label', async t => {
   assert.equal(h.calls.length, 0);
 });
 
-test('finish rejects BTW and failed subagents', async t => {
+test('finish rejects BTW, promoted sessions and failed subagents', async t => {
   const h = await fixture(t);
-  const btw = await task(h.root, 'btw'), failed = await task(h.root, 'agent', 'failed');
+  const btw = await task(h.root, 'btw'), failed = await task(h.root, 'agent', 'failed'),
+    session = await task(h.root, 'session', 'completed');
   await h.events.session_start({}, h.ctx);
-  for (const run of [btw, failed]) {
+  for (const run of [btw, failed, session]) {
     const result = await h.tools.rex_finish.execute('x', { id: run.id }, undefined, undefined, h.ctx);
     assert.equal(result.isError, true);
   }
@@ -326,15 +327,22 @@ test('an open pane stays listed whatever its state; closed panes and BTW never a
   const rows = ['completed', 'failed', 'interrupted', 'cancelled', 'exited'].map((taskState, i) => ({
     id: `${i}`, kind: 'agent', taskState, closed: false, label: `Task ${i}`, createdAt: past(i),
   }));
-  rows.push({ id: 'btw', kind: 'btw', taskState: 'running' }, { id: 'closed', kind: 'shell', taskState: 'running', closed: true });
-  // Only running work counts as active for the status line...
+  rows.push({ id: 'btw', kind: 'btw', taskState: 'running' }, { id: 'closed', kind: 'shell', taskState: 'running', closed: true },
+    { id: 'session', kind: 'session', taskState: 'running', name: 'aside', closed: false });
+  // Only running work counts as active for the status line; a promoted session is
+  // a conversation, never work...
   assert.deepEqual(activeOverviewRows(rows), []);
-  // ...but the list is the set of panes still open for inspection.
+  // ...but the list is the set of panes still open for inspection, and a promoted
+  // session is a conversation the reader drives, so it keeps out of the widget and
+  // is found in /rex-tasks instead.
   assert.deepEqual(visibleRows(rows).map(row => row.id).sort(), ['0', '1', '2', '3', '4']);
   assert.equal(visibleRows(rows)[0].id, '1'); // a failed pane outranks completed ones
   assert.equal(overviewLines(rows, 80).length, 5);
   assert.deepEqual(visibleRows([rows[5]]), []);
   assert.deepEqual(overviewLines([rows[5]], 80), []);
+  assert.deepEqual(visibleRows([rows[7]]), []);
+  assert.deepEqual(overviewLines([rows[7]], 80), []);
+  assert.match(rowLabel(rows[7]), /^\[Session\] aside · Running/);
 });
 
 test('widget survives completion and disappears only when the pane closes', async t => {

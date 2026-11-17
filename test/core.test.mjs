@@ -23,6 +23,14 @@ test('BTW placement anchors on the parent, preserves focus, and keeps arguments 
   assert.ok(args.includes('$(touch BAD)'));
   assert.equal(args.at(-1), '/tmp/x y');
 });
+test('renaming a promoted pane is one block rename with the whole label', async () => {
+  let args;
+  const rex = new Rex('rex', async (_file, argv) => { args = argv; return ''; });
+  await rex.rename({ rexSession: 'session', block: 'block-1' }, 'Pi · aside');
+  assert.deepEqual(args, ['block', 'rename', '-s', 'session', 'block-1', 'Pi · aside']);
+  // An unknown block would be renamed through a guessed target; refuse instead.
+  await assert.rejects(rex.rename({ rexSession: 'session' }, 'Pi · aside'), /Block identity unknown/);
+});
 test('a job is created inside its floating layer instead of being split in', async () => {
   const calls = [];
   const rex = new Rex('rex', async (_file, argv) => {
@@ -181,6 +189,7 @@ function harness(root, entries = [], dependencies = {}, overlay = false) {
   } };
   adapter({ on: (n, f) => { events[n] = f; }, registerCommand: (n, f) => { commands[n] = f; },
     registerTool: t => { tools[t.name] = t; }, getThinkingLevel: () => 'off',
+    getActiveTools: () => ['read', 'bash'],
     sendMessage: (m, options) => { messages.push({ ...m, options }); entries.push({ type: 'custom_message', ...m }); },
   }, dependencies);
   return { ctx, events, commands, tools, messages, entries, pickers, statuses };
@@ -231,6 +240,44 @@ test('/btw carries the composed user message but keeps the raw question as name 
   assert.equal(run.task, 'why is it like this');
   assert.equal(run.name, 'why is it like this');
   assert.match(await readFile(join(run.dir, 'prompt.md'), 'utf8'), /Current task:\npre\n\nwhy is it like this\n\npost$/);
+  // A side conversation records the tools its promotion would switch on.
+  assert.deepEqual(run.promoteTools, ['read', 'bash']);
+});
+test('a promoted side conversation is renamed once, and never wakes the parent', async t => {
+  const dir = await temporary(t), root = join(dir, 'rex-adapter', 'parent'), renames = [];
+  const h = harness(dir, [], { rex: {
+    inspect: async () => ({ window: 'w' }), open: async () => 'block',
+    rename: async (run, label) => { renames.push({ id: run.id, label }); return ''; },
+  } });
+  t.after(() => h.events.session_shutdown());
+  const run = await prepareRun(root, { kind: 'btw', name: 'aside', task: 'why' }, '');
+  // The child has already switched its own tools on and retagged the record; its
+  // note is the only instruction this side acts on, and only for the pane label.
+  await atomicJson(join(run.dir, 'run.json'), { ...run, kind: 'session', promotedAt: new Date().toISOString() });
+  await atomicJson(join(run.dir, 'promote-1.json'), { id: run.id, status: 'promoted' });
+  await h.events.session_start({}, h.ctx);
+  await until(() => renames.length === 1);
+  assert.deepEqual(renames[0], { id: run.id, label: 'Pi · aside' });
+  assert.equal((await readdir(run.dir)).includes('promote-1.json'), false);
+  // Promotion is not a task result: no transcript message, no model turn.
+  assert.equal(h.messages.length, 0);
+  await h.events.session_start({}, h.ctx);
+  await new Promise(r => setTimeout(r, 200));
+  assert.equal(renames.length, 1);
+});
+test('a promoted session is a conversation, not a task: no exit report and no rex_finish', async t => {
+  const dir = await temporary(t), root = join(dir, 'rex-adapter', 'parent');
+  const h = harness(dir); t.after(() => h.events.session_shutdown());
+  const run = await prepareRun(root, { kind: 'session', name: 'aside', task: 'why', cwd: root }, '');
+  await atomicJson(join(run.dir, 'result.json'), { status: 'completed', text: 'answer' });
+  await atomicJson(join(run.dir, 'activity.json'), { task: 'completed', process: 'idle' });
+  await atomicJson(join(run.dir, 'exit.json'), { code: 0 });
+  await h.events.session_start({}, h.ctx);
+  await new Promise(r => setTimeout(r, 300));
+  assert.equal(h.messages.length, 0);
+  const result = await h.tools.rex_finish.execute('x', { id: run.id }, undefined, undefined, h.ctx);
+  assert.equal(result.isError, true);
+  assert.match(result.details.error, /promoted session/);
 });
 test('control rejects arbitrary IDs without contacting Rex', async t => {
   const dir = await temporary(t), h = harness(dir); t.after(() => h.events.session_shutdown());

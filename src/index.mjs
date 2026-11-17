@@ -1,5 +1,5 @@
 import { watch } from 'node:fs';
-import { readdir, stat } from 'node:fs/promises';
+import { readdir, stat, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Rex, rexExecutable, atomicJson, readJson, listRuns, prepareRun, composeUserMessage,
@@ -251,7 +251,7 @@ export default function adapter(pi, dependencies = {}) {
       watcher = watch(root, { recursive: true }, (_event, file) => {
         const parts = String(file || '').split(/[\\/]/);
         const name = parts.at(-1);
-        if (file && !/^(run|activity|result|exit|turn-.*|return-.*)\.json$/.test(name)) return;
+        if (file && !/^(run|activity|result|exit|turn-.*|return-.*|promote-.*)\.json$/.test(name)) return;
         if (/^[0-9a-f-]{36}$/.test(parts[0])) tracked.set(parts[0], join(root, parts[0]));
         clearTimeout(debounce); debounce = setTimeout(() => void reconcile(), 100);
       });
@@ -302,12 +302,25 @@ export default function adapter(pi, dependencies = {}) {
         ]);
         if (epoch !== generation) return;
         if (run.kind === 'shell' && exit && run.block && !run.closed && delivered.has(`${id}/result.json`) && !cleanup.has(id)) cleanup.set(id, 0);
+        // A side conversation promoted from its own pane has already switched its
+        // tools on and retagged itself; this side only renames the pane and says
+        // so. Deleting the note is the acknowledgement, so it cannot repeat.
+        const promoteFile = run.kind === 'session' ? files.find(n => /^promote-.*\.json$/.test(n)) : undefined;
+        if (promoteFile) {
+          try {
+            await (await rex()).rename(run, `Pi · ${fit(run.name, 48)}`, lifetime.signal);
+            await rm(join(dir, promoteFile), { force: true });
+            if (epoch === generation && ctx.hasUI) ctx.ui.notify(ui('promoted', { name: run.name }), 'info');
+          } catch (error) {
+            if (epoch === generation && ctx.hasUI) ctx.ui.setStatus('rex', `Rex: promote ${run.name}: ${error.message}`);
+          }
+        }
         let receipts;
         if (run.kind === 'btw') receipts = files.filter(n => /^return-.*\.json$/.test(n));
         else if (run.kind === 'agent' && run.interactive) {
           receipts = files.filter(n => /^turn-.*\.json$/.test(n));
           if ((exit && (exit.code !== 0 || exit.taskIncomplete || !latestResult) && !run.taskCompletedBeforeClose) || run.status === 'cancelled') receipts.push('exit.json');
-        } else receipts = exit || run.status === 'cancelled' ? ['result.json'] : [];
+        } else if (run.kind !== 'session') receipts = exit || run.status === 'cancelled' ? ['result.json'] : [];
         if (run.chain && !receipts.length && !run.closed && !exit && stalledLaunch(run, Date.now())) {
           // No block id was ever confirmed, so nothing can observe this run: it would
           // otherwise sit in `tracked` and leave the chain running with no report.
@@ -655,6 +668,9 @@ export default function adapter(pi, dependencies = {}) {
       }
       const options = applyRole(role, {
         owner: ctx.sessionManager.getSessionId(), kind, name, task, cwd: resolve(ctx.cwd, params.cwd || role?.cwd || '.'),
+        // A side conversation can become a full session in its own pane; the
+        // tools it should switch on are the ones this parent has right now.
+        ...(kind === 'btw' ? { promoteTools: pi.getActiveTools?.() ?? [] } : {}),
         runtime: kind === 'shell' ? 'shell-runner' : 'direct-pi',
         rexSession: process.env.REX_SESSION, anchor: process.env.REX_BLOCK,
         piBin: process.env.PI_REX_PI_BIN || process.argv[1] || 'pi',
@@ -746,6 +762,7 @@ export default function adapter(pi, dependencies = {}) {
       if (action === 'finish') {
         const result = await readJson(join(run.dir, 'result.json'));
         if (run.kind === 'btw') throw new Error('BTW is kept open; use explicit close if requested.');
+        if (run.kind === 'session') throw new Error('This is a promoted session you drive yourself; rex_finish applies to delegated agents only. Use close if requested.');
         const states = runStates(run, exitBeforeClose, result, activity);
         if (states.taskState !== 'completed' ||
             (!exitBeforeClose && activity?.process !== 'idle')) {
@@ -883,7 +900,7 @@ export default function adapter(pi, dependencies = {}) {
             if (!row.closed) {
               if (row.block) {
                 actions.push({ value: 'focus', label: ui('focus') });
-                if (row.kind !== 'btw' && row.taskState === 'completed') actions.push({ value: 'finish', label: ui('finish') });
+                if (row.kind === 'agent' && row.taskState === 'completed') actions.push({ value: 'finish', label: ui('finish') });
                 if (row.kind !== 'shell' && row.processState === 'running') actions.push({ value: 'interrupt', label: ui('interrupt') });
                 actions.push({ value: 'close', label: ui('close') });
               }
