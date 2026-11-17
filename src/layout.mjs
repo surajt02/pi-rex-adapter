@@ -1,7 +1,6 @@
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { atomicJson, listRuns, readJson, runStatus } from './core.mjs';
-import { DEFAULT_CONFIG } from './config.mjs';
 import { firstLeafIndex, gridPlan, gridTree, paneCount, windowPanes } from './grid.mjs';
 
 export { withLayoutLock } from './core.mjs';
@@ -78,7 +77,7 @@ async function liveMembers(root, client, run, role, signal) {
   return live;
 }
 
-export async function choosePlacement(root, client, run, signal, panesPerTab = DEFAULT_CONFIG.panesPerTab) {
+export async function choosePlacement(root, client, run, signal) {
   signal?.throwIfAborted();
   if (run.kind === 'btw') {
     const parent = await client.inspect({ rexSession: run.rexSession, block: run.anchor }, signal);
@@ -87,7 +86,7 @@ export async function choosePlacement(root, client, run, signal, panesPerTab = D
   const role = run.kind === 'agent' ? 'agents' : 'jobs';
   const live = await liveMembers(root, client, run, role, signal);
   if (role === 'agents') return agentsPlacement(run, live, client, signal);
-  return jobsPlacement(run, live, panesPerTab, role);
+  return chipPlacement(run, live);
 }
 
 // Agents never spill into an "Agents 2" tab: the whole group grows in one grid
@@ -112,24 +111,33 @@ async function agentsPlacement(run, live, client, signal) {
   return { role: 'agents', mode: 'grid', window, anchor: panes[0], direction: 'right', rows: plan.rows, frame, title };
 }
 
-function jobsPlacement(run, live, panesPerTab, role) {
-  const groups = new Map();
-  const occupancy = new Map();
-  let maxPage = 0;
-  for (const { member, window } of live) {
-    maxPage = Math.max(maxPage, member.layout.page || 1);
-    occupancy.set(window, (occupancy.get(window) || 0) + 1);
-    if (window !== member.layout.window) continue;
-    const group = groups.get(window) || { page: member.layout.page, members: [] };
-    group.members.push(member);
-    groups.set(window, group);
-  }
-  for (const [window, group] of [...groups].sort((a, b) => a[1].page - b[1].page)) {
-    if (occupancy.get(window) < panesPerTab) return { role, mode: 'split', window, page: group.page,
-      anchor: group.members[0].block, direction: 'right' };
-  }
-  const page = maxPage + 1;
-  return { role, mode: 'window', page, title: `Jobs${page > 1 ? ` ${page}` : ''} · ${run.owner.slice(0, 8)}` };
+// A background job is a chip: a floating layer, minimized from the moment it
+// exists, so it never takes room from the pane the user is reading. These are
+// where a chip sits when it is popped open again; several jobs stack down the
+// right side instead of covering each other.
+const CHIP_SLOTS = Object.freeze([
+  [0.54, 0.04, 0.44, 0.3],
+  [0.54, 0.36, 0.44, 0.3],
+  [0.54, 0.68, 0.44, 0.3],
+]);
+
+function chipPlacement(run, live) {
+  const taken = new Set(live.filter(entry => entry.member.layout?.mode === 'chip')
+    .map(entry => entry.member.layout.slot).filter(slot => Number.isInteger(slot)));
+  const free = CHIP_SLOTS.findIndex((_, index) => !taken.has(index));
+  const slot = free === -1 ? taken.size % CHIP_SLOTS.length : free;
+  return { role: 'jobs', mode: 'chip', anchor: run.anchor, slot, bounds: CHIP_SLOTS[slot] };
+}
+
+// The job is split in beside the parent pane and then floated out of the tiled
+// layout, which gives the parent its space back at once. Minimizing is what
+// turns it into a chip; the block keeps running either way.
+export async function applyChip(client, run, signal) {
+  const layout = run.layout || {};
+  const { layer_id: layer } = await client.float(run.rexSession, run.block, layout.bounds, signal);
+  layout.layer = layer;
+  signal?.throwIfAborted();
+  await client.minimize(run.rexSession, layer, signal);
 }
 
 // Rex can only split the side of one pane at a time, so a grid is built by

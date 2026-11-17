@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-export const DEFAULT_CONFIG = Object.freeze({ language: 'en', panesPerTab: 2 });
+export const DEFAULT_CONFIG = Object.freeze({ language: 'en' });
 
 // Separate extension settings: never rewrite Pi's settings.json or create files
 // on startup. Read once per session/reload; project fields override global ones.
@@ -18,8 +18,7 @@ export async function loadConfig(cwd, { env = process.env, home = homedir() } = 
       if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Expected a JSON object');
       for (const [key, item] of Object.entries(value)) {
         if (key === 'language' && ['en', 'zh'].includes(item)) config.language = item;
-        else if (key === 'panesPerTab' && Number.isSafeInteger(item) && item >= 1) config.panesPerTab = item;
-        else errors.push(`${file}: ${key === 'language' ? 'language must be "en" or "zh"' : key === 'panesPerTab' ? 'panesPerTab must be a positive integer' : `Unknown setting: ${key}`}`);
+        else errors.push(`${file}: ${key === 'language' ? 'language must be "en" or "zh"' : `Unknown setting: ${key}`}`);
       }
     } catch (error) { if (error.code !== 'ENOENT') errors.push(`${file}: ${error.message}`); }
   }

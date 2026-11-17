@@ -30,7 +30,7 @@ const messages = {
     reused: 'Rex · Side conversation reused', started: 'Rex · Task started',
     inputPending: 'Rex · Question not confirmed; retained. Fix the input error, then /reload.',
     btwOnly: 'Only available in a BTW conversation', noAnswer: 'No answer to return yet',
-    returned: 'Conclusion queued for the parent session', configWarning: 'Rex configuration: {message}', gridWarning: 'Rex · Agent tab not rearranged: {message}',
+    returned: 'Conclusion queued for the parent session', configWarning: 'Rex configuration: {message}', gridWarning: 'Rex · Agent tab not rearranged: {message}', chipWarning: 'Rex · Job not shown as a chip: {message}',
   },
   zh: {
     shellRunning: '运行中 · 下方显示实时输出', shellNoOutput: '命令未产生输出。',
@@ -62,7 +62,7 @@ const messages = {
     reused: 'Rex · 已复用侧聊', started: 'Rex · 任务已启动',
     inputPending: 'Rex · 侧聊问题尚未确认接收，已保留；修复输入错误后 /reload 重试',
     btwOnly: '仅限 BTW 侧聊使用', noAnswer: '尚无可回传的回答',
-    returned: '结论已排入主会话接收队列', configWarning: 'Rex 配置：{message}', gridWarning: 'Rex · 代理标签页未重排：{message}',
+    returned: '结论已排入主会话接收队列', configWarning: 'Rex 配置：{message}', gridWarning: 'Rex · 代理标签页未重排：{message}', chipWarning: 'Rex · 后台任务未能收进浮动窗：{message}',
   },
 };
 export function t(language, key, values = {}) {

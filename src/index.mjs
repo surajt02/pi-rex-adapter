@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { Rex, rexExecutable, atomicJson, readJson, listRuns, prepareRun,
   contextSnapshot, tailFile, runStatus, runStates } from './core.mjs';
 
-import { withLayoutLock, existingBtw, choosePlacement, applyGrid } from './layout.mjs';
+import { withLayoutLock, existingBtw, choosePlacement, applyGrid, applyChip } from './layout.mjs';
 import { discoverRoles, findRole, applyRole, roleSummary } from './roles.mjs';
 import { MAX_STEPS, createChain, readChain, writeChain, chainSummary, composeTask, stepLabel, chainDirectory } from './chain.mjs';
 import { registerChild } from './child.mjs';
@@ -600,7 +600,7 @@ export default function adapter(pi, dependencies = {}) {
         model: params.model || (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined),
         thinking: pi.getThinkingLevel(), configCwd: ctx.cwd, chain: params.chain,
       }, params);
-      options.layout = await choosePlacement(launchRoot, client, options, signal, config.panesPerTab);
+      options.layout = await choosePlacement(launchRoot, client, options, signal);
       signal.throwIfAborted();
       const snapshot = kind === 'shell' || params.fork === false || role?.fork === false
         ? '' : contextSnapshot(ctx.sessionManager.getBranch());
@@ -618,11 +618,15 @@ export default function adapter(pi, dependencies = {}) {
       }
       await atomicJson(join(run.dir, 'run.json'), run);
       // The pane exists and its record is already on disk, so a tab that could
-      // not be rearranged is reported and left alone rather than abandoning a
-      // child that is already running.
-      if (run.layout?.mode === 'grid' && run.block) {
+      // not be rearranged, or a job that could not be floated aside, is reported
+      // and left alone rather than abandoning a child that is already running.
+      if (run.block && run.layout?.mode === 'grid') {
         try { await applyGrid(client, run, signal); }
         catch (error) { if (epoch === generation && ctx.hasUI) ctx.ui.notify(ui('gridWarning', { message: error.message }), 'warning'); }
+      }
+      if (run.block && run.layout?.mode === 'chip') {
+        try { await applyChip(client, run, signal); await atomicJson(join(run.dir, 'run.json'), run); }
+        catch (error) { if (epoch === generation && ctx.hasUI) ctx.ui.notify(ui('chipWarning', { message: error.message }), 'warning'); }
       }
       if (epoch === generation) { tracked.set(run.id, run.dir); monitor(); void reconcile(); }
       return { id: run.id, block: run.block, window: run.window, status: run.status, error: run.error, artifacts: run.dir,

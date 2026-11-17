@@ -54,7 +54,7 @@ Parent and child processes must share the same machine and filesystem. Remote Re
 | `/btw <question>` | Opens or reuses a side conversation to the right of the main Pi |
 | `/btw` | Focuses the existing side conversation |
 | `/rex-agent <task>` | Starts an interactive Pi subagent in an Agents tab |
-| `/bg <command>` | Starts a background shell job in a Jobs tab |
+| `/bg <command>` | Starts a background shell job as a minimized chip |
 | `/rex-tasks` | Opens the task manager overlay |
 
 The main agent can also launch and manage tasks through structured tools. Completion arrives automatically; it does not need to poll for results.
@@ -63,12 +63,11 @@ The main agent can also launch and manage tasks through structured tools. Comple
 
 ## Configuration
 
-Both settings are optional:
+The setting is optional:
 
 ```json
 {
-  "language": "en",
-  "panesPerTab": 2
+  "language": "en"
 }
 ```
 
@@ -78,15 +77,14 @@ Both settings are optional:
 | Setting | Default | Behavior |
 | --- | --- | --- |
 | `language` | `"en"` | `"en"` or `"zh"`. Covers the **main agent's overview**, including titles, task states and counts, plus overlays, action feedback and child-session notices. |
-| `panesPerTab` | `2` | A positive integer limiting adapter-managed panes in each **Jobs** tab. Set `1` for a separate job tab, or `3` to keep the first three jobs together and open a new page for the fourth. Agents ignore it: they all share one grid tab. |
 
-For example, `{"language":"zh"}` in the project file changes only the UI language. The pane limit still comes from the global configuration or its default.
+For example, `{"language":"zh"}` in the project file changes the UI language, and `{}` leaves it at the default. The former `panesPerTab` setting is gone: agents grew into one grid tab and background jobs became chips, so nothing is paged any more and the key is now reported as unknown.
 
 Settings are read at startup, session switches, and `/reload`. No default file is created and no configuration watcher is added. Reload an existing child Pi separately to update its UI language. Children launched into another checkout through `cwd` still read their parent project's configuration. Invalid settings report their source and fall back to inherited or default values; other valid fields still apply.
 
 Language settings leave task text, agent answers, logs, underlying errors, and structured status values intact. They do not set the model's response language. Tool names, slash commands, and their descriptions remain in English.
 
-The pane limit affects future jobs only. Existing job panes are not moved, resized, or closed, and their splits are always horizontal: each new job takes the right half of its target pane. Agent tabs are a grid and are rearranged on each launch, as described under workspace and layout. BTW keeps its own reusable pane beside the parent, outside this limit. Manually added panes do not count toward it.
+Placement follows the tool the main agent chose: a job becomes a chip, an agent joins the grid tab, and BTW keeps its own reusable pane beside the parent. Manually added panes are never touched. The sections below describe each of them.
 
 ## Side conversations
 
@@ -127,7 +125,7 @@ If no name is supplied, the task's first line becomes a short, readable name.
 
 ## Background shell jobs
 
-`/bg` runs `/bin/sh -c` in a dedicated terminal block in a Jobs tab, using the parent's working directory by default and closed stdin.
+`/bg` runs `/bin/sh -c` in its own terminal block, floated aside and minimized into a chip so the main pane keeps its size, using the parent's working directory by default and closed stdin.
 
 The pane immediately shows the task name, working directory, and complete submitted command, including multiline commands. Live output follows; when the command exits, a short summary shows its outcome, exit code or signal, and elapsed time. A silent command is explicitly marked as producing no output. Headings use muted blue and follow the configured UI language. These display lines are separate from `output.log` and the result sent to the parent.
 
@@ -245,17 +243,16 @@ Current Rex session (selected by the user)
 │    └────┴────┘   └──┴──┴──┘    ├────┼────┤   ├────┼────┤
 │                                │ 3  │ 4  │   │3 │4 │5 │
 │                                └────┴────┘   └──┴──┴──┘
-└─ Jobs · <parent Pi ID>: build | test
+└─ chips: each background job, minimized into the corner
 ```
 
 - Agents never page into an `Agents 2` tab. One, two and three agents are columns; from four the tab becomes a grid of rows of equal panes, with the spare panes in the lower rows, so five reads as two above three. The grid is chosen from the tab's size in pixels, because a wide window wants wide rows and a square one wants square cells.
 - The agent tab is rearranged on each launch: panes are detached and placed back in reading order, so the newcomer takes the last cell and the panes already there keep their order. Panes resize whenever the grid shape changes; a crowded tab is read by zooming a single pane rather than by opening more tabs.
-- Jobs keep the paged behaviour below: each new job takes the right half of its target pane, up to `panesPerTab` per tab.
+- A background job never takes a pane from what the user is reading. It is split in beside the parent pane, floated out of the tiled layout and minimized at once, which gives the parent its space back immediately; what remains is one chip in the corner. Jobs stack down the right side, three at a time, so a chip that is popped open lands where it will not cover the prompt. Popping one keeps it open until it is minimized again, and the block keeps running while minimized, so output is never lost; when the job's block closes, its chip goes with it.
 - Agents and Jobs have separate groups, owned by a parent Pi session. Titles include a short parent ID. Different parents do not reuse one another's task panes. The main tab and Rex session are not renamed; Rex sessions are not automatically created.
 - Layout creation and closing are serialized per parent, and the grid rearrangement runs under the same lock. Group membership is restored from task records after `/reload`.
-- Shell blocks retained for undelivered results still occupy a slot. After delivery and cleanup, the remaining tab can accept another task. Only open records advance page numbers.
-- Empty tabs are not deleted automatically because users may have added content. Reused page numbers can therefore produce the same title as an older empty tab.
-- Blocks the user moves out of the Agents tab stay where they are and are not counted, so the grid is built from the panes still in that tab; it never grows beside a block the user moved away. Moving a block does not change ownership, result delivery, or control permissions. Manually added panes do not count toward the Job limit and are not rearranged.
+- A job's chip stays until its block closes: keeping the log of an undelivered result keeps the chip, and delivering it closes both. An empty Agents tab is not deleted automatically because users may have added content.
+- Blocks the user moves out of the Agents tab stay where they are and are not counted, so the grid is built from the panes still in that tab; it never grows beside a block the user moved away. A chip the user moves, resizes or leaves open is likewise left alone. Moving a block does not change ownership, result delivery, or control permissions, and manually added panes are not rearranged.
 - When selecting a layout or reusing BTW, an exact Rex response that a direct Pi block is missing marks the task closed and allows creation to continue. If no exit code remains, the process outcome is explicitly unknown; existing answers are retained. Legacy runner tasks still require a valid exit record before automatic retirement. Connection failures, missing sessions, and uncertain creations stop creation in that group; manually verified removal can be recorded through the task manager's recovery action.
 
 `rex_tasks` separates `taskState`, `processState`, and `blockState`. An answered agent can be `completed / idle / open`; a finished shell job can be `completed / exited / open`. Task and process states come from the last activity and exit records. Block state comes from the current Rex inspection, or `unverified` if inspection fails. Confirmed closed records always report `closed`, including when a close races with inspection.
@@ -314,17 +311,17 @@ The regression suite covers CLI arguments, context snapshots, interactive Pi sta
 
 A real Rex shell smoke test verifies the command header, title, native working/done status, stdout/stderr, and Python output arriving before process exit, with display text excluded from retained logs. An isolated real Rex test also verifies direct Agent/BTW startup in English and Chinese, native Pi identity, startup failure, block closure, and recovery of exits and removed panes after the parent reconnects. Broader layout and focus scenarios still need end-to-end verification. Suggested smoke tests inside Rex:
 
-1. `/bg printf hello`: receive `exit=0` and `hello`, then see the pane close after delivery.
+1. `/bg printf hello`: a minimized chip appears in the corner while the parent pane keeps its size; receive `exit=0` and `hello`, then see the chip disappear after delivery.
 2. `/bg sleep 5; echo done; exit 7`: continue working while the job runs, then receive the nonzero exit.
 3. Open a BTW conversation: verify the right-side split and retained main focus; return a conclusion with `/btw-return`.
 4. Reload the parent while jobs run: receive each result once after completion. Repeat a close and verify that it is harmless.
 5. Finish several jobs together: receive a batch instead of a separate model turn for every result.
-6. With the default pane limit, launch three agents, then three shell jobs: verify separate Agents/Jobs groups and second pages.
+6. Launch four agents, then three shell jobs: verify the agents form columns and then a 2x2 grid in one tab, while every job becomes its own minimized chip and the parent pane is unchanged.
 7. Ask another BTW question: verify that the same conversation is reused and bare `/btw` focuses it.
 8. Verify that finishing an idle agent preserves its result and that its task, process, and block states remain distinct.
 9. Check that finished tasks leave the overview but remain in history. Shell panes close after delivery; agents wait for the main agent to finish them.
-10. Close all tasks in Jobs 2 and Jobs 3: verify that closed pages do not force the next new page to be Jobs 4.
-11. Change UI language and pane limit, then reload: verify the main overview and future launches while preserving existing layouts.
+10. Click a job's overview row while its chip is minimized: verify the chip pops open at its slot and the click never terminates the job.
+11. Change the UI language, then reload: verify the main overview and future launches while preserving existing layouts.
 
 ## Publishing releases
 

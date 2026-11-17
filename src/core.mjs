@@ -50,9 +50,9 @@ export class Rex {
   async open(manifest, runner, signal) {
     signal?.throwIfAborted();
     const layout = manifest.layout;
-    // A grid pane is split in first and then arranged, so it needs the same
-    // exact-anchor split as a BTW side conversation.
-    const split = layout?.mode === 'split' || layout?.mode === 'grid' || (!layout && manifest.kind === 'btw');
+    // A grid pane is split in first and then arranged, and a job is split in and
+    // then floated away, so both need the same exact-anchor split as a BTW.
+    const split = ['split', 'grid', 'chip'].includes(layout?.mode) || (!layout && manifest.kind === 'btw');
     const args = split
       ? ['split', '-b', layout?.anchor || manifest.anchor, `--split=${layout?.direction || 'right'}`, '--ratio=50']
       : layout ? ['window', 'new', layout.title] : ['run'];
@@ -79,6 +79,12 @@ export class Rex {
   }
   async detach(session, block, signal) {
     return this.api('session.detach_block', { session_id: session, block_id: block }, signal);
+  }
+  async float(session, block, bounds, signal) {
+    return this.api('session.float_block', { session_id: session, block_id: block, bounds }, signal);
+  }
+  async minimize(session, layer, signal) {
+    return this.api('session.set_layer_state', { session_id: session, layer_id: layer, state: 'minimized' }, signal);
   }
   async move(session, { block, anchor, direction, ratio }, signal) {
     return this.api('session.move_block', { session_id: session, block_id: block,

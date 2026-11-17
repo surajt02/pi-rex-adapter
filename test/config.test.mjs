@@ -35,28 +35,31 @@ test('missing configuration defaults to English and two panes without creating f
 
 test('project overrides only its fields and respects a custom Pi agent directory', async t => {
   const dir = await temp(t), global = join(dir, 'custom-agent');
-  await mkdir(global); await writeFile(join(global, 'rex.json'), JSON.stringify({ language: 'zh', panesPerTab: 4 }));
-  await settings(dir, { panesPerTab: 1 });
+  await mkdir(global); await writeFile(join(global, 'rex.json'), JSON.stringify({ language: 'zh' }));
+  await settings(dir, {});
   const loaded = await loadConfig(dir, { env: { PI_CODING_AGENT_DIR: '~/custom-agent' }, home: dir });
-  assert.deepEqual(loaded, { config: { language: 'zh', panesPerTab: 1 }, errors: [] });
+  assert.deepEqual(loaded, { config: { language: 'zh' }, errors: [] });
 });
 
 test('bad fields retain valid inherited values and malformed JSON is reported without crashing', async t => {
   const dir = await temp(t), global = join(dir, '.pi', 'agent');
   await mkdir(global, { recursive: true });
-  await writeFile(join(global, 'rex.json'), JSON.stringify({ language: 'zh', panesPerTab: 3 }));
-  for (const panesPerTab of [0, -1, 1.5, '3', null, Number.MAX_SAFE_INTEGER + 1]) {
+  await writeFile(join(global, 'rex.json'), JSON.stringify({ language: 'zh' }));
+  // panesPerTab capped how many jobs shared a tab; jobs are chips now, so it is
+  // reported as an unknown setting rather than silently ignored.
+  for (const panesPerTab of [0, -1, 1.5, '3', null, 2]) {
     await settings(dir, { language: 'xx', panesPerTab, extra: true });
     const loaded = await loadConfig(dir, { env: {}, home: dir });
-    assert.deepEqual(loaded.config, { language: 'zh', panesPerTab: 3 });
+    assert.deepEqual(loaded.config, { language: 'zh' });
     assert.equal(loaded.errors.length, 3);
     assert.ok(loaded.errors.every(error => error.includes(join(dir, '.pi', 'rex.json'))));
+    assert.ok(loaded.errors.some(error => error.includes('panesPerTab')));
   }
   for (const content of ['{', 'null', '[]']) {
     await writeFile(join(dir, '.pi', 'rex.json'), content);
     const loaded = await loadConfig(dir, { env: {}, home: dir });
     assert.equal(loaded.errors.length, 1);
-    assert.deepEqual(loaded.config, { language: 'zh', panesPerTab: 3 });
+    assert.deepEqual(loaded.config, { language: 'zh' });
   }
 });
 
@@ -70,6 +73,8 @@ function harness(dir, t) {
     view: async () => ({ windows: [] }),
     detach: async () => ({}),
     move: async () => ({}),
+    float: async () => ({ layer_id: 'layer-1' }),
+    minimize: async () => ({}),
     open: async run => {
       const block = `b-${++serial}`;
       run.window = run.layout.window || `w-${serial}`; run.layout.window = run.window;
@@ -89,8 +94,8 @@ function harness(dir, t) {
       kind === 'bg_run' ? { command: task } : kind === 'subagent' ? { task, label: 'Delegated task' } : { task }, undefined, undefined, ctx) };
 }
 
-test('agents never page into a second tab while shell jobs keep the configured cap', async t => {
-  const dir = await temp(t); envFor(t, dir); await settings(dir, { panesPerTab: 3 });
+test('agents share one grid tab and every job becomes its own chip', async t => {
+  const dir = await temp(t); envFor(t, dir); await settings(dir, { language: 'en' });
   const h = harness(dir, t); await h.events.session_start({}, h.ctx);
   let start = h.layouts.length;
   for (let i = 0; i < 4; i++) assert.equal((await h.launch('subagent', `task ${i}`)).isError, undefined);
@@ -101,12 +106,11 @@ test('agents never page into a second tab while shell jobs keep the configured c
   start = h.layouts.length;
   for (let i = 0; i < 4; i++) assert.equal((await h.launch('bg_run', `job ${i}`)).isError, undefined);
   const jobs = h.layouts.slice(start);
-  assert.deepEqual(jobs.map(x => x.mode), ['window', 'split', 'split', 'window']);
-  assert.ok(jobs.slice(1, 3).every(x => x.direction === 'right' && x.window === jobs[0].window));
-  assert.equal(jobs[3].page, 2);
+  assert.deepEqual(jobs.map(x => x.mode), ['chip', 'chip', 'chip', 'chip']);
+  assert.deepEqual(jobs.map(x => x.slot), [0, 1, 2, 0]);
   // Reloading never moves or resizes an existing tab, and agents still join theirs.
   const before = [...h.blocks];
-  await settings(dir, { panesPerTab: 1 }); await h.events.session_start({}, h.ctx);
+  await settings(dir, { language: 'en' }); await h.events.session_start({}, h.ctx);
   assert.deepEqual([...h.blocks], before);
   assert.equal((await h.launch('subagent', 'after reload')).isError, undefined);
   assert.equal(h.layouts.at(-1).mode, 'grid');

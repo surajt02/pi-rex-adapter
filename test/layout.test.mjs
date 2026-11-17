@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { choosePlacement, existingBtw, withLayoutLock } from '../src/layout.mjs';
+import { choosePlacement, existingBtw, withLayoutLock, applyChip } from '../src/layout.mjs';
 import { Rex, prepareRun, atomicJson, readJson, runStates, listRuns } from '../src/core.mjs';
 import { registerChild } from '../src/child.mjs';
 import adapter from '../src/index.mjs';
@@ -23,7 +23,7 @@ function fakeRex() {
     async open(run) {
       calls.push(structuredClone(run.layout));
       const id = `block-${++count}`;
-      run.window = run.layout.mode === 'window' ? `window-${++windows}` : run.layout.window;
+      run.window = run.layout.mode === 'window' ? `window-${++windows}` : run.layout.window || 'window-1';
       run.layout.window = run.window;
       blocks.set(id, run.window); return id;
     },
@@ -45,7 +45,7 @@ async function create(root, client, kind = 'agent', owner = 'owner-123456') {
   });
 }
 
-test('agents share one grid tab; jobs keep a paged tab of their own', async t => {
+test('agents share one grid tab while each job gets its own chip', async t => {
   const root = await temp(t), client = fakeRex();
   const agents = [];
   for (let i = 0; i < 4; i++) agents.push(await create(root, client));
@@ -58,8 +58,8 @@ test('agents share one grid tab; jobs keep a paged tab of their own', async t =>
   assert.equal(agents[1].layout.anchor, agents[0].block);
   assert.deepEqual(agents[1].layout.frame, { columns: 174, rows: 80, cellWidth: 16, cellHeight: 30 });
   const job = await create(root, client, 'shell');
-  assert.equal(job.layout.title, 'Jobs · owner-12');
-  assert.notEqual(job.window, agents[0].window);
+  assert.equal(job.layout.mode, 'chip');
+  assert.equal(job.layout.anchor, 'parent');
   const other = await create(join(root, 'other-parent'), client, 'agent', 'different');
   assert.equal(other.layout.mode, 'window');
   assert.equal(other.layout.title, 'Agents · differen');
@@ -83,16 +83,18 @@ test('a pane the user dragged elsewhere is never counted, moved back or grown be
   for (const run of [first, second, third]) assert.equal(client.blocks.get(run.block), 'user-tab');
 });
 
-test('closed group member frees its position; exited retained logs still occupy a pane', async t => {
+test('a chip whose block is gone is retired before the next slot is chosen', async t => {
   const root = await temp(t), client = fakeRex();
   const a = await create(root, client, 'shell'), b = await create(root, client, 'shell');
+  // A's block has exited and is gone: its chip slot comes back for the next job.
   await atomicJson(join(a.dir, 'exit.json'), { code: 0 });
+  client.blocks.delete(a.block);
+  const inspect = client.inspect;
+  client.inspect = async r => { if (!client.blocks.has(r.block)) throw missingBlock(r); return inspect(r); };
   const c = await create(root, client, 'shell');
-  assert.equal(c.layout.page, 2);
-  b.closed = true; client.blocks.delete(b.block);
-  await atomicJson(join(b.dir, 'run.json'), b);
-  const d = await create(root, client, 'shell');
-  assert.equal(d.layout.anchor, a.block);
+  assert.equal(c.layout.slot, 0);
+  assert.equal((await readJson(join(a.dir, 'run.json'))).closed, true);
+  assert.equal(b.layout.slot, 1);
 });
 
 test('unknown creation or failed inspection never silently creates more panes', async t => {
@@ -147,11 +149,10 @@ for (const kind of ['agent', 'shell', 'btw']) test(`${kind}: absent exited panes
   assert.deepEqual(await readJson(join(run.dir, 'exit.json')), exit);
   assert.equal(client.calls.some(c => c.action === 'close'), false);
   if (kind === 'btw') assert.equal(replacement.layout.anchor, 'parent');
-  else {
+  else if (kind === 'agent') {
     assert.equal(replacement.layout.mode, 'window');
-    assert.equal(replacement.layout.title, kind === 'agent' ? 'Agents · owner-12' : 'Jobs · owner-12');
-    if (kind === 'shell') assert.equal(replacement.layout.page, 1);
-  }
+    assert.equal(replacement.layout.title, 'Agents · owner-12');
+  } else assert.equal(replacement.layout.mode, 'chip');
 });
 
 for (const kind of ['agent', 'btw']) test(`${kind}: ambiguous failures and missing exit evidence remain blocking`, async t => {
@@ -309,15 +310,30 @@ test('new child does not let queued input overtake the initial CLI task', async 
   assert.deepEqual(sent, ['second task']);
 });
 
-test('closed Jobs pages do not advance the next page number', async t => {
+test('each job takes its own chip slot and a closed job frees that slot again', async t => {
   const root = await temp(t), client = fakeRex();
-  const runs = [];
-  for (let i = 0; i < 5; i++) runs.push(await create(root, client, 'shell'));
-  assert.equal(runs.at(-1).layout.page, 3);
-  for (const run of runs.slice(2)) {
-    run.closed = true; await atomicJson(join(run.dir, 'run.json'), run); client.blocks.delete(run.block);
-  }
+  const jobs = [];
+  for (let i = 0; i < 4; i++) jobs.push(await create(root, client, 'shell'));
+  // Three slots stack down the right side; the fourth reuses one rather than
+  // covering a pane the user can still see.
+  assert.deepEqual(jobs.map(job => job.layout.slot), [0, 1, 2, 0]);
+  assert.deepEqual(jobs[0].layout.bounds, [0.54, 0.04, 0.44, 0.3]);
+  assert.deepEqual(jobs[2].layout.bounds, [0.54, 0.68, 0.44, 0.3]);
+  // Every chip is split in beside the parent pane and floated from the same spot.
+  assert.ok(jobs.every(job => job.layout.anchor === 'parent'));
+  const spare = jobs[1];
+  spare.closed = true; await atomicJson(join(spare.dir, 'run.json'), spare); client.blocks.delete(spare.block);
   const next = await create(root, client, 'shell');
-  assert.equal(next.layout.page, 2);
-  assert.equal(next.layout.title, 'Jobs 2 · owner-12');
+  assert.equal(next.layout.slot, 1);
+});
+
+test('a chip is floated out of the tiled layout and minimized, keeping its layer', async t => {
+  const root = await temp(t), client = fakeRex();
+  const calls = [];
+  client.float = async (session, block, bounds) => { calls.push(['float', session, block, bounds]); return { layer_id: 'layer-1' }; };
+  client.minimize = async (session, layer) => { calls.push(['minimize', session, layer]); };
+  const run = await create(root, client, 'shell');
+  await applyChip(client, run);
+  assert.deepEqual(calls, [['float', 'rex', run.block, run.layout.bounds], ['minimize', 'rex', 'layer-1']]);
+  assert.equal(run.layout.layer, 'layer-1');
 });
