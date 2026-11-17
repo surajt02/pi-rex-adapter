@@ -50,8 +50,16 @@ export class Rex {
   async open(manifest, runner, signal) {
     signal?.throwIfAborted();
     const layout = manifest.layout;
-    // A grid pane is split in first and then arranged, and a job is split in and
-    // then floated away, so both need the same exact-anchor split as a BTW.
+    // A job is born inside its own floating layer, so it never takes room from
+    // the pane the user is reading, not even for the moment a split would. A
+    // server that rejects the layer, or does not have the method, still gets a
+    // chip: the split below puts the pane in and applyChip floats it away.
+    if (layout?.mode === 'chip') {
+      try { return await this.chip(manifest, runner, signal); }
+      catch (error) { if (signal?.aborted) throw error; }
+    }
+    // A grid pane is split in first and then arranged, so it needs the same
+    // exact-anchor split as a BTW.
     const split = ['split', 'grid', 'chip'].includes(layout?.mode) || (!layout && manifest.kind === 'btw');
     const args = split
       ? ['split', '-b', layout?.anchor || manifest.anchor, `--split=${layout?.direction || 'right'}`, '--ratio=50']
@@ -69,6 +77,27 @@ export class Rex {
     if (layout && !manifest.window) manifest.window = (await this.inspect(manifest, signal)).window;
     if (layout) layout.window = manifest.window;
     return result.block_ids[0];
+  }
+  // Creating the block inside the layer takes one call instead of a split, a
+  // float and a minimize, and the tiled layout is never touched. Rex has no way
+  // to create a layer already minimized, so the caller still minimizes it.
+  async chip(manifest, runner, signal) {
+    const layout = manifest.layout;
+    const command = manifest.runtime === 'direct-pi' ? directPiCommand(manifest) : [process.execPath, runner, manifest.dir];
+    const result = await this.api('session.new_layer', {
+      session_id: manifest.rexSession,
+      ...(layout.window ? { window_id: layout.window } : {}),
+      bounds: layout.bounds,
+      focus: false,
+      layout: { block: { flavor: 'com.superlogical.terminal.shell', label: manifest.name,
+        options: { shell: 'none', command, cwd: manifest.cwd, exit: { on_completion: false } } } },
+    }, signal);
+    if (!Array.isArray(result.block_ids) || typeof result.block_ids[0] !== 'string') {
+      throw new Error('Rex returned no block ID; inspect Rex before retrying.');
+    }
+    manifest.block = result.block_ids[0];
+    layout.layer = result.layer_id;
+    return manifest.block;
   }
   async api(method, params, signal) {
     signal?.throwIfAborted();

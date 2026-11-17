@@ -22,6 +22,46 @@ test('BTW placement anchors on the parent, preserves focus, and keeps arguments 
   assert.ok(args.includes('$(touch BAD)'));
   assert.equal(args.at(-1), '/tmp/x y');
 });
+test('a job is created inside its floating layer instead of being split in', async () => {
+  const calls = [];
+  const rex = new Rex('rex', async (_file, argv) => {
+    calls.push(argv); return JSON.stringify({ layer_id: 'layer-1', block_ids: ['chip'], revision: 3 });
+  });
+  const run = { kind: 'shell', runtime: 'shell-runner', rexSession: 'session', cwd: '/tmp/a b', name: 'build',
+    dir: '/tmp/r y', layout: { mode: 'chip', window: 'window-1', bounds: [0.54, 0.04, 0.44, 0.3] } };
+  assert.equal(await rex.open(run, '/path/runner.mjs'), 'chip');
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].slice(0, 3), ['api', 'call', 'session.new_layer']);
+  const params = JSON.parse(calls[0][3]);
+  assert.equal(params.session_id, 'session');
+  assert.equal(params.window_id, 'window-1');
+  assert.deepEqual(params.bounds, [0.54, 0.04, 0.44, 0.3]);
+  assert.equal(params.focus, false);
+  assert.equal(params.layout.block.flavor, 'com.superlogical.terminal.shell');
+  assert.equal(params.layout.block.label, 'build');
+  // Keep-open, no shell wrapper, and the same runner invocation the CLI would make.
+  assert.deepEqual(params.layout.block.options, { shell: 'none',
+    command: [process.execPath, '/path/runner.mjs', '/tmp/r y'], cwd: '/tmp/a b', exit: { on_completion: false } });
+  assert.equal(run.block, 'chip');
+  assert.equal(run.layout.layer, 'layer-1');
+});
+
+test('a job falls back to being split in when Rex refuses the floating layer', async () => {
+  const calls = [];
+  const rex = new Rex('rex', async (_file, argv) => {
+    calls.push(argv);
+    if (argv[2] === 'session.new_layer') throw new Error('unknown method: session.new_layer');
+    return JSON.stringify({ block_ids: ['new'], window_id: 'window-1' });
+  });
+  const run = { kind: 'shell', rexSession: 'session', cwd: '/tmp', name: 'build', dir: '/tmp/r',
+    anchor: 'parent', layout: { mode: 'chip', anchor: 'parent', bounds: [0.54, 0.04, 0.44, 0.3] } };
+  assert.equal(await rex.open(run, '/path/runner.mjs'), 'new');
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1].slice(0, 5), ['split', '-b', 'parent', '--split=right', '--ratio=50']);
+  // No layer yet, so applyChip still has to float the pane out of the layout.
+  assert.equal(run.layout.layer, undefined);
+});
+
 test('unknown creation result is not retried', async () => {
   let calls = 0;
   const rex = new Rex('rex', async () => { calls++; return '{}'; });

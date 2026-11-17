@@ -319,15 +319,28 @@ test('each job takes its own chip slot and a closed job frees that slot again', 
   assert.deepEqual(jobs.map(job => job.layout.slot), [0, 1, 2, 0]);
   assert.deepEqual(jobs[0].layout.bounds, [0.54, 0.04, 0.44, 0.3]);
   assert.deepEqual(jobs[2].layout.bounds, [0.54, 0.68, 0.44, 0.3]);
-  // Every chip is split in beside the parent pane and floated from the same spot.
+  // Every chip belongs to the window the parent pane is in, beside that pane.
   assert.ok(jobs.every(job => job.layout.anchor === 'parent'));
+  assert.ok(jobs.every(job => job.layout.window === 'main'));
   const spare = jobs[1];
   spare.closed = true; await atomicJson(join(spare.dir, 'run.json'), spare); client.blocks.delete(spare.block);
   const next = await create(root, client, 'shell');
   assert.equal(next.layout.slot, 1);
 });
 
-test('a chip is floated out of the tiled layout and minimized, keeping its layer', async t => {
+test('a chip born in its layer is only minimized, never floated', async t => {
+  const root = await temp(t), client = fakeRex();
+  const calls = [];
+  client.float = async () => { calls.push(['float']); return { layer_id: 'wrong' }; };
+  client.minimize = async (session, layer) => { calls.push(['minimize', session, layer]); };
+  const run = await create(root, client, 'shell');
+  run.layout.layer = 'layer-1'; // What session.new_layer returned to open().
+  await applyChip(client, run);
+  assert.deepEqual(calls, [['minimize', 'rex', 'layer-1']]);
+  assert.equal(run.layout.layer, 'layer-1');
+});
+
+test('a chip that was split in instead is floated out and then minimized', async t => {
   const root = await temp(t), client = fakeRex();
   const calls = [];
   client.float = async (session, block, bounds) => { calls.push(['float', session, block, bounds]); return { layer_id: 'layer-1' }; };

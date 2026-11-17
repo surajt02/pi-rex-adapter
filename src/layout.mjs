@@ -86,7 +86,7 @@ export async function choosePlacement(root, client, run, signal) {
   const role = run.kind === 'agent' ? 'agents' : 'jobs';
   const live = await liveMembers(root, client, run, role, signal);
   if (role === 'agents') return agentsPlacement(run, live, client, signal);
-  return chipPlacement(run, live);
+  return chipPlacement(run, live, client, signal);
 }
 
 // Agents never spill into an "Agents 2" tab: the whole group grows in one grid
@@ -121,12 +121,20 @@ const CHIP_SLOTS = Object.freeze([
   [0.54, 0.68, 0.44, 0.3],
 ]);
 
-function chipPlacement(run, live) {
+async function chipPlacement(run, live, client, signal) {
   const taken = new Set(live.filter(entry => entry.member.layout?.mode === 'chip')
     .map(entry => entry.member.layout.slot).filter(slot => Number.isInteger(slot)));
   const free = CHIP_SLOTS.findIndex((_, index) => !taken.has(index));
   const slot = free === -1 ? taken.size % CHIP_SLOTS.length : free;
-  return { role: 'jobs', mode: 'chip', anchor: run.anchor, slot, bounds: CHIP_SLOTS[slot] };
+  const placement = { role: 'jobs', mode: 'chip', anchor: run.anchor, slot, bounds: CHIP_SLOTS[slot] };
+  // The chip belongs to the window the parent pane is in, which the layer has to
+  // be told up front. Without it the server would use the active window, which
+  // is usually the same one; an unreachable parent is reported by the launch.
+  try {
+    const anchor = await client.inspect({ rexSession: run.rexSession, block: run.anchor }, signal);
+    if (anchor?.window) placement.window = anchor.window;
+  } catch (error) { if (signal?.aborted) throw error; }
+  return placement;
 }
 
 // The job is split in beside the parent pane and then floated out of the tiled
@@ -134,10 +142,13 @@ function chipPlacement(run, live) {
 // turns it into a chip; the block keeps running either way.
 export async function applyChip(client, run, signal) {
   const layout = run.layout || {};
-  const { layer_id: layer } = await client.float(run.rexSession, run.block, layout.bounds, signal);
-  layout.layer = layer;
-  signal?.throwIfAborted();
-  await client.minimize(run.rexSession, layer, signal);
+  if (!layout.layer) {
+    // A chip created by the fallback split is still a tiled pane at this point.
+    const { layer_id: layer } = await client.float(run.rexSession, run.block, layout.bounds, signal);
+    layout.layer = layer;
+    signal?.throwIfAborted();
+  }
+  await client.minimize(run.rexSession, layout.layer, signal);
 }
 
 // Rex can only split the side of one pane at a time, so a grid is built by
