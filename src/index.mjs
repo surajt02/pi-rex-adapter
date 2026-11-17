@@ -118,15 +118,28 @@ export default function adapter(pi, dependencies = {}) {
   // click looks swallowed.
   // A click has to move the reader's screen, not only the server's idea of the
   // active window. The app changes tabs only when a client action asks it to, so
-  // the pane's window is selected first. Best effort: an app that refuses actions
-  // (Remote Control off) is left to the server-side focus alone.
+  // the pane's window is selected first. An app that refuses the request leaves
+  // the server-side focus in place; a pane on the reader's own tab needs nothing
+  // more, but one in another tab would then be focused invisibly, so say so.
   async function reveal(run, signal) {
-    if (!run.block) return;
+    if (!run.block) return true;
+    let window;
     try {
       const client = await rex();
-      const window = windowOf(await client.view(run.rexSession, signal), run.block);
-      if (window) await client.reveal(run.rexSession, window, signal);
-    } catch (error) { if (signal?.aborted) throw error; }
+      const view = await client.view(run.rexSession, signal);
+      window = windowOf(view, run.block);
+      if (!window) return true;
+      await client.reveal(run.rexSession, window, signal);
+      return true;
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      // A missing or unreachable app must never turn a focus into an error.
+      try {
+        const here = windowOf(await (await rex()).view(run.rexSession, signal), process.env.REX_BLOCK);
+        if (window && window !== here && current?.hasUI) actionStatus(current, ui('tabHidden', { name: run.name || run.id }));
+      } catch { /* the focus still happens server-side */ }
+      return false;
+    }
   }
   function focusFromWidget(ctx, id) {
     const epoch = generation;

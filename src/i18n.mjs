@@ -2,6 +2,7 @@
 const messages = {
   en: {
     shellRunning: 'Running · live output follows', shellNoOutput: 'The command produced no output.',
+    tabHidden: '{name} is in another tab · turn on Remote Control to switch to it',
     childAssignment: 'Assigned task: {task}', childTopic: 'Side topic: {task}', childAgentDone: 'Result queued · awaiting parent review',
     childBtwDone: 'Answer ready · optionally share with /btw-return', childReturned: 'Conclusion queued · ready to continue',
     title: 'Rex Tasks', running: 'Running', completed: 'Completed', failed: 'Failed', interrupted: 'Interrupted',
@@ -34,6 +35,7 @@ const messages = {
   },
   zh: {
     shellRunning: '运行中 · 下方显示实时输出', shellNoOutput: '命令未产生输出。',
+    tabHidden: '{name} 位于另一个标签页 · 打开 Remote Control 才能切换过去',
     childAssignment: '委派任务：{task}', childTopic: '侧聊主题：{task}', childAgentDone: '结果已排队 · 等待主 agent 处理',
     childBtwDone: '答案已就绪 · 可用 /btw-return 回传', childReturned: '结论已排队 · 可继续侧聊',
     title: 'Rex 任务', running: '运行中', completed: '已完成', failed: '失败', interrupted: '已中断',
