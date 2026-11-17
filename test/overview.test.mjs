@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import adapter from '../src/index.mjs';
 import { prepareRun, atomicJson, readJson } from '../src/core.mjs';
-import { overviewLines, buildGroups, fit, orderRows, activeOverviewRows, visibleRows, MAX_ROWS, FRAME_MS } from '../src/overview.mjs';
+import { overviewLines, buildGroups, fit, focusTarget, orderRows, activeOverviewRows, visibleRows, MAX_ROWS, FRAME_MS } from '../src/overview.mjs';
 import { measure } from '../src/columns.mjs';
 
 async function fixture(t, control) {
@@ -369,4 +369,58 @@ test('task list and details stay in overlays, with no notification or transcript
   await h.commands['rex-tasks'].handler('', h.ctx);
   assert.equal(notices, 0); assert.equal(h.messages.length, 0);
   assert.deepEqual(Object.keys(h.commands).sort(), ['bg', 'btw', 'rex-agent', 'rex-tasks']);
+});
+
+test('only rows that name a pane are clickable: the chain heading and unstarted steps are not', () => {
+  const { rows, chains } = scenario();
+  for (const row of rows) row.block = `block:${row.id}`;
+  const hits = [];
+  const lines = overviewLines(rows, 126, undefined, 'en', chains, hits);
+  assert.equal(lines.length, 6);
+  // Step 3 is still pending, so it has no pane and no hit: the reader cannot be
+  // sent to a pane that does not exist yet.
+  assert.deepEqual(hits, [{ y: 1, id: 's1' }, { y: 2, id: 's2' }, { y: 4, id: 'l1' }, { y: 5, id: 'l2' }]);
+  assert.equal(hits.some(hit => hit.y === 0), false, 'the ◆ heading is a heading, not a pane');
+  assert.equal(focusTarget({ id: 'x', block: 'block:x' }, 'skipped'), undefined);
+  assert.equal(focusTarget({ id: 'y', block: 'block:y' }, 'queued'), undefined);
+  assert.equal(focusTarget({ id: 'z' }, 'running'), undefined, 'a run without a block has nowhere to go');
+  assert.equal(focusTarget({ id: 'c', block: 'block:c', closed: true }, 'completed'), undefined);
+  assert.equal(focusTarget({ id: 'd', block: 'block:d' }, 'running'), 'd');
+});
+
+test('a click on a row focuses that pane; a press alone, a right-click, and empty rows do nothing', async t => {
+  const h = await fixture(t), run = await task(h.root, 'agent', 'running');
+  await h.events.session_start({}, h.ctx); await h.boundary();
+  const component = h.widgets.at(-1)[1]({ requestRender() {}, terminal: { rows: 24 } }, {});
+  const lines = component.render(100);
+  assert.equal(lines.length, 1);
+  const event = extra => ({ button: 'left', x: 5, width: 100, height: lines.length, ...extra });
+  // Pi synthesizes a click only when the press was claimed, so the press must be
+  // handled without acting, and the click is the one action.
+  assert.deepEqual(component.handleMouse(event({ type: 'press', y: 0 })), { handled: true });
+  assert.equal(h.calls.length, 0, 'claiming the press does not move focus');
+  assert.deepEqual(component.handleMouse(event({ type: 'click', y: 0 })), { handled: true, render: true });
+  await until(() => h.calls.length > 0);
+  assert.equal(h.calls[0][1], 'focus');
+  assert.equal(h.calls[0][0].block, run.block);
+  assert.equal(component.handleMouse(event({ type: 'click', y: 0, button: 'right' })), undefined);
+  assert.equal(component.handleMouse(event({ type: 'press', y: 1 })), undefined, 'below the last row is not ours');
+});
+
+test('each row keeps its own target, so a click lands on the row under the cursor', async t => {
+  const h = await fixture(t);
+  const first = await task(h.root, 'agent', 'running');
+  const second = await task(h.root, 'shell', 'running');
+  await rm(join(second.dir, 'exit.json'));
+  await atomicJson(join(second.dir, 'activity.json'), { task: 'running', process: 'running' });
+  await h.events.session_start({}, h.ctx); await h.boundary();
+  const component = h.widgets.at(-1)[1]({ requestRender() {}, terminal: { rows: 24 } }, {});
+  const lines = component.render(100);
+  assert.equal(lines.length, 2);
+  const click = y => component.handleMouse({ type: 'click', button: 'left', x: 5, y, width: 100, height: lines.length });
+  click(0); click(1);
+  await until(() => h.calls.length >= 2);
+  const focused = h.calls.map(call => call[0].block);
+  assert.deepEqual(new Set(focused), new Set([first.block, second.block]), 'two rows, two panes');
+  assert.equal(new Set(focused).size, 2, 'the second row did not repeat the first row\'s target');
 });

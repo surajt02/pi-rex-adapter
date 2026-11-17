@@ -111,11 +111,25 @@ export default function adapter(pi, dependencies = {}) {
       }
     }, 300);
   }
+  // Clicking a row in the list jumps to that pane. The gesture is quiet on
+  // purpose: no transcript entry, no notification when it works, because the
+  // reader's proof is Rex switching panes. A failure does have to speak, or the
+  // click looks swallowed.
+  function focusFromWidget(ctx, id) {
+    const epoch = generation;
+    control(id, 'focus').catch(error => {
+      if (epoch === generation && ctx?.hasUI) ctx.ui.notify(`Focus failed: ${error.message}`, 'error');
+    });
+  }
   function updateUI() {
     const visible = overviewEnabled ? visibleRows(overviewRows) : [];
     const key = visible.length ? JSON.stringify(visible.map(({ id, kind, name, task, taskState, label, role, tokens, chain }) =>
       ({ id, kind, name, task, taskState, label, role, tokens, chain: chain?.id }))) : 'empty';
-    if (key !== uiKey) { showOverview(current, overviewRows, overviewEnabled, config.language, chainMap); uiKey = key; }
+    if (key !== uiKey) {
+      showOverview(current, overviewRows, overviewEnabled, config.language, chainMap,
+        { focus: id => focusFromWidget(current, id) });
+      uiKey = key;
+    }
     const count = activeOverviewRows(overviewRows).length;
     const status = count ? ui('active', { count }) : undefined;
     if (current?.hasUI && status !== statusText) { current.ui.setStatus('rex', status); statusText = status; }

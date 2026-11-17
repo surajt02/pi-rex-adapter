@@ -153,7 +153,17 @@ function stepLine(step, { connector, last, roleWidth, width, theme, language, no
 // many rows the rest are behind /rex-tasks.
 export const MAX_ROWS = 10;
 
-export function overviewLines(rows, width, theme, language = 'en', chains) {
+// A row can be clicked only when it names a pane the reader can be sent to. A
+// step the chain has not started has no pane yet; a skipped one never will.
+const UNREACHABLE = new Set(['pending', 'queued', 'skipped']);
+export function focusTarget(row, state) {
+  return row?.block && !row.closed && !UNREACHABLE.has(state) ? row.id : undefined;
+}
+
+// `hits`, when passed, collects the line each clickable row was drawn on: the
+// widget answers a click by looking up its local y in that map, so the mapping
+// is always the frame the reader was looking at.
+export function overviewLines(rows, width, theme, language = 'en', chains, hits) {
   if (!width || width <= 0) return [];
   const { groups, loose } = buildGroups(rows, chains);
   if (!groups.length && !loose.length) return [];
@@ -162,19 +172,25 @@ export function overviewLines(rows, width, theme, language = 'en', chains) {
   const dim = text => (theme?.fg ? theme.fg('dim', text) : text);
   const lines = [];
   let budget = MAX_ROWS, rendered = 0;
-  const push = line => { lines.push(line); budget--; };
+  const push = (line, target) => {
+    if (target && hits) hits.push({ y: lines.length, id: target });
+    lines.push(line); budget--;
+  };
   for (const group of groups) {
     if (budget <= 1) break;
+    // The chain line is a heading, not a pane: it has nothing to focus.
     push(chainLine(group, width, theme));
     for (const [index, step] of group.steps.entries()) {
       if (budget <= 1) break;
-      push(stepLine(step, { connector: true, last: index === group.steps.length - 1, roleWidth, width, theme, language, now }));
+      push(stepLine(step, { connector: true, last: index === group.steps.length - 1, roleWidth, width, theme, language, now }),
+        focusTarget(step.row, step.state));
       rendered++;
     }
   }
   for (const row of loose) {
     if (budget <= 1) break;
-    push(stepLine({ row, label: row.label, state: row.taskState }, { connector: false, roleWidth, width, theme, language, now }));
+    push(stepLine({ row, label: row.label, state: row.taskState }, { connector: false, roleWidth, width, theme, language, now }),
+      focusTarget(row, row.taskState));
     rendered++;
   }
   const total = groups.reduce((count, group) => count + group.steps.length, 0) + loose.length;
@@ -183,15 +199,35 @@ export function overviewLines(rows, width, theme, language = 'en', chains) {
   return lines;
 }
 
-export function showOverview(ctx, rows, enabled, language = 'en', chains) {
+export function showOverview(ctx, rows, enabled, language = 'en', chains, options) {
   if (!ctx?.hasUI) return;
   if (!enabled || !visibleRows(rows).length) {
     ctx.ui.setWidget('rex-tasks', undefined, { placement: 'aboveEditor' });
     return;
   }
   ctx.ui.setWidget('rex-tasks', (tui, theme) => {
+    const targets = new Map();
     const component = {
-      render: width => overviewLines(rows, width, theme, language, chains),
+      render(width) {
+        const hits = [];
+        const lines = overviewLines(rows, width, theme, language, chains, hits);
+        targets.clear();
+        if (options?.focus) for (const hit of hits) targets.set(hit.y, hit.id);
+        return lines;
+      },
+      // Pi only synthesizes a click when the press was claimed by a component,
+      // so claim the press and act on the click that follows it. Anything that
+      // is not a clickable row returns undefined, which leaves text selection,
+      // the wheel, and the rest of the widget to Pi.
+      handleMouse(event) {
+        if (event.button !== 'left' || !options?.focus) return undefined;
+        const id = targets.get(event.y);
+        if (!id) return undefined;
+        if (event.type === 'press') return { handled: true };
+        if (event.type !== 'click') return undefined;
+        options.focus(id);
+        return { handled: true, render: true };
+      },
       invalidate() {},
       dispose() { if (component.clock) clearInterval(component.clock); component.clock = undefined; },
     };
