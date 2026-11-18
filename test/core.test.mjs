@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { Rex, prepareRun, readJson, listRuns, atomicJson, piArgs, contextSnapshot, tailFile, runStatus,
+import { Rex, prepareRun, readJson, listRuns, atomicJson, piArgs, parentPiCommand, contextSnapshot, tailFile, runStatus,
   composeUserMessage, COMPOSE_USER_MESSAGE } from '../src/core.mjs';
 import adapter from '../src/index.mjs';
 
@@ -23,14 +23,19 @@ test('BTW placement anchors on the parent, preserves focus, and keeps arguments 
   assert.ok(args.includes('$(touch BAD)'));
   assert.equal(args.at(-1), '/tmp/x y');
 });
-test('renaming a promoted pane is one block rename with the whole label', async () => {
-  let args;
-  const rex = new Rex('rex', async (_file, argv) => { args = argv; return ''; });
-  await rex.rename({ rexSession: 'session', block: 'block-1' }, 'Pi · aside');
-  assert.deepEqual(args, ['block', 'rename', '-s', 'session', 'block-1', 'Pi · aside']);
-  // An unknown block would be renamed through a guessed target; refuse instead.
-  await assert.rejects(rex.rename({ rexSession: 'session' }, 'Pi · aside'), /Block identity unknown/);
+test('a promoted session is launched as a parent Pi, not as a child run', () => {
+  const command = parentPiCommand({ piBin: 'pi', sessionPath: '/runs/old/session.jsonl', name: 'Pi · aside',
+    extension: '/adapter/index.mjs', model: 'p/m', thinking: 'high', tools: '+read,+bash',
+    promptFile: '/runs/old/p.md', path: '/bin' });
+  assert.deepEqual(command.slice(0, 2), ['/usr/bin/env', 'PATH=/bin']);
+  assert.equal(command.includes('PI_REX_RUN_DIR=/runs/old'), false);
+  assert.deepEqual(command.slice(2), ['pi', '--session', '/runs/old/session.jsonl', '--name', 'Pi · aside',
+    '-e', '/adapter/index.mjs', '--model', 'p/m', '--thinking', 'high', '--tools', '+read,+bash', '--', '@/runs/old/p.md']);
+  // No prompt file means an idle session on the resumed history.
+  assert.equal(parentPiCommand({ piBin: 'pi', sessionPath: '/s', name: 'Pi · x', extension: '/a.mjs' })
+    .includes('--'), false);
 });
+
 test('a job is created inside its floating layer instead of being split in', async () => {
   const calls = [];
   const rex = new Rex('rex', async (_file, argv) => {
@@ -86,11 +91,14 @@ test('context only includes current supplied branch text, omits tool payloads an
   assert.match(context, /question/); assert.match(context, /answer/); assert.doesNotMatch(context, /SECRET/);
   assert.match(contextSnapshot([{ type: 'compaction', summary: '123456789' }], 3), /omitted\]\n789$/);
 });
-test('fresh child session, literal prompt file and explicit extension; BTW has limited default tools', async t => {
+test('fresh child session and literal prompt file; BTW leaves the tool registry whole', async t => {
   const root = await temporary(t);
   const run = await prepareRun(root, { kind: 'btw', task: '`touch BAD`', name: 'test' }, 'context');
   const args = piArgs(run, '/extension.mjs');
-  assert.ok(args.includes('read,grep,find,ls'));
+  // --tools would drop the other tools from the registry, so /promote could never
+  // switch them on. The child narrows the active set instead, and MCP stays off
+  // because that really is a startup decision.
+  assert.equal(args.includes('--tools'), false);
   assert.ok(args.includes('--no-mcp'));
   assert.ok(!args.includes('--print'));
   assert.equal(args.at(-2), '--');
@@ -195,7 +203,8 @@ function harness(root, entries = [], dependencies = {}, overlay = false) {
   return { ctx, events, commands, tools, messages, entries, pickers, statuses };
 }
 async function until(predicate) {
-  for (let i = 0; i < 350; i++) { if (predicate()) return; await new Promise(r => setTimeout(r, 20)); }
+  // Awaited, so an async predicate is not mistaken for an immediate truthy promise.
+  for (let i = 0; i < 350; i++) { if (await predicate()) return; await new Promise(r => setTimeout(r, 20)); }
   assert.fail('Timed out waiting for event');
 }
 test('completion pushes one follow-up, reload does not replay it, BTW returns only explicitly', async t => {
@@ -240,31 +249,133 @@ test('/btw carries the composed user message but keeps the raw question as name 
   assert.equal(run.task, 'why is it like this');
   assert.equal(run.name, 'why is it like this');
   assert.match(await readFile(join(run.dir, 'prompt.md'), 'utf8'), /Current task:\npre\n\nwhy is it like this\n\npost$/);
-  // A side conversation records the tools its promotion would switch on.
-  assert.deepEqual(run.promoteTools, ['read', 'bash']);
 });
-test('a promoted side conversation is renamed once, and never wakes the parent', async t => {
-  const dir = await temporary(t), root = join(dir, 'rex-adapter', 'parent'), renames = [];
+test('a promote note is accepted at once, but the pane waits for the process to be gone', async t => {
+  const dir = await temporary(t), root = join(dir, 'rex-adapter', 'parent'), opened = [];
+  let running = {};
   const h = harness(dir, [], { rex: {
-    inspect: async () => ({ window: 'w' }), open: async () => 'block',
-    rename: async (run, label) => { renames.push({ id: run.id, label }); return ''; },
+    inspect: async () => ({ window: 'w' }),
+    process: async () => running,
+    open: async manifest => { opened.push(manifest); return 'new-block'; },
+    control: async () => '',
   } });
   t.after(() => h.events.session_shutdown());
-  const run = await prepareRun(root, { kind: 'btw', name: 'aside', task: 'why' }, '');
-  // The child has already switched its own tools on and retagged the record; its
-  // note is the only instruction this side acts on, and only for the pane label.
-  await atomicJson(join(run.dir, 'run.json'), { ...run, kind: 'session', promotedAt: new Date().toISOString() });
-  await atomicJson(join(run.dir, 'promote-1.json'), { id: run.id, status: 'promoted' });
+  const run = await prepareRun(root, { kind: 'btw', name: 'aside', task: 'why', cwd: root, block: 'btw-block', anchor: 'parent-block', model: 'p/m' }, '');
+  // The child waits for acceptance before it leaves.
+  await atomicJson(join(run.dir, 'promote-1.json'), { id: run.id, note: '', status: 'requested' });
   await h.events.session_start({}, h.ctx);
-  await until(() => renames.length === 1);
-  assert.deepEqual(renames[0], { id: run.id, label: 'Pi · aside' });
-  assert.equal((await readdir(run.dir)).includes('promote-1.json'), false);
-  // Promotion is not a task result: no transcript message, no model turn.
-  assert.equal(h.messages.length, 0);
-  await h.events.session_start({}, h.ctx);
-  await new Promise(r => setTimeout(r, 200));
-  assert.equal(renames.length, 1);
+  await until(async () => (await readJson(join(run.dir, 'promote-1.json')))?.status === 'accepted');
+  await new Promise(r => setTimeout(r, 250));
+  // Resuming a file a live Pi is still writing would mix two processes in it.
+  assert.equal(opened.length, 0);
+  assert.equal((await readdir(run.dir)).includes('promote-1.json'), true);
+  // Rex, not the exit record, is what proves the child is gone. The note is the
+  // last thing removed, so waiting for it also waits for the whole handoff.
+  running = { last_exit: { exit_code: 0 } };
+  await until(async () => !(await readdir(run.dir)).includes('promote-1.json'));
+  assert.equal(opened.length, 1);
 });
+
+test('a promoted side conversation becomes its own parent Pi in a pane beside it', async t => {
+  const dir = await temporary(t), root = join(dir, 'rex-adapter', 'parent'), opened = [], closed = [];
+  const h = harness(dir, [], { rex: {
+    inspect: async () => ({ window: 'w' }),
+    process: async () => ({ last_exit: { exit_code: 0 } }),
+    open: async manifest => { opened.push(manifest); return 'new-block'; },
+    control: async (run, action) => { closed.push({ id: run.id, action }); return ''; },
+  } });
+  t.after(() => h.events.session_shutdown());
+  const run = await prepareRun(root, { kind: 'btw', name: 'aside', task: 'why', cwd: root,
+    block: 'btw-block', anchor: 'parent-block', model: 'p/m' }, '');
+  await atomicJson(join(run.dir, 'session.jsonl'), JSON.stringify({ type: 'session' }) + '\n');
+  await atomicJson(join(run.dir, 'promote-1.json'), { id: run.id, note: 'fix the path', status: 'requested' });
+  await atomicJson(join(run.dir, 'exit.json'), { code: 0 });
+  await h.events.session_start({}, h.ctx);
+  await until(() => opened.length === 1);
+  const manifest = opened[0];
+  assert.equal(manifest.runtime, 'parent-pi');
+  assert.equal(manifest.name, 'Pi · aside');
+  assert.equal(manifest.sessionPath, join(run.dir, 'session.jsonl'));
+  assert.equal(manifest.cwd, root);
+  assert.equal(manifest.model, 'p/m');
+  // The resumed transcript restores the narrow loadout, so the parent's tools go
+  // in as `+name` modifiers: plain names would become a registry allowlist.
+  assert.equal(manifest.tools, '+read,+bash');
+  // A parent Pi, not a child: no run dir, no prompt.md, but the adapter loaded.
+  assert.equal(manifest.promptFile, join(run.dir, 'promote-prompt.md'));
+  assert.equal(await readFile(manifest.promptFile, 'utf8'), 'fix the path');
+  const command = parentPiCommand(manifest);
+  assert.ok(!command.some(part => String(part).startsWith('PI_REX_RUN_DIR=')));
+  assert.ok(command.includes('--session') && command.includes(manifest.sessionPath));
+  assert.equal(command.includes('--no-mcp'), false);
+  assert.deepEqual(command.slice(command.indexOf('--tools'), command.indexOf('--tools') + 2), ['--tools', '+read,+bash']);
+  assert.ok(command.includes('-e'));
+  assert.equal(command.at(-1), `@${manifest.promptFile}`);
+  // Same shape as the pane it replaces, and it takes focus because the old pane
+  // the reader was typing in is about to disappear.
+  assert.deepEqual(manifest.layout, { mode: 'split', anchor: 'btw-block', direction: 'right', ratio: 50 });
+  assert.equal(manifest.focus, true);
+  await until(() => closed.length === 1);
+  assert.deepEqual(closed[0], { id: run.id, action: 'close' });
+  const stored = await readJson(join(run.dir, 'run.json'));
+  assert.equal(stored.closed, true);
+  assert.equal(stored.detachedTo, 'new-block');
+  assert.equal(stored.status, 'detached');
+  assert.equal((await readdir(run.dir)).includes('promote-1.json'), false);
+  // Promotion is a handoff, not a result: the parent is not woken.
+  assert.equal(h.messages.length, 0);
+  // The old record is history, so a later scan cannot open a second pane.
+  await h.events.session_start({}, h.ctx);
+  await new Promise(r => setTimeout(r, 250));
+  assert.equal(opened.length, 1);
+});
+
+test('a dead anchor falls back to the pane the side conversation was split beside', async t => {
+  const dir = await temporary(t), root = join(dir, 'rex-adapter', 'parent'), anchors = [];
+  const h = harness(dir, [], { rex: {
+    inspect: async () => ({ window: 'w' }),
+    process: async () => ({ last_exit: { exit_code: 0 } }),
+    open: async manifest => {
+      anchors.push(manifest.layout.anchor);
+      if (anchors.length === 1) throw new Error('split anchor refused');
+      return 'new-block';
+    },
+    control: async () => '',
+  } });
+  t.after(() => h.events.session_shutdown());
+  const run = await prepareRun(root, { kind: 'btw', name: 'aside', task: 'why', cwd: root,
+    block: 'gone-block', anchor: 'parent-block' }, '');
+  await atomicJson(join(run.dir, 'promote-1.json'), { id: run.id, note: '', status: 'requested' });
+  await atomicJson(join(run.dir, 'exit.json'), { code: 0 });
+  await h.events.session_start({}, h.ctx);
+  await until(() => anchors.length === 2);
+  assert.deepEqual(anchors, ['gone-block', 'parent-block']);
+  assert.equal((await readJson(join(run.dir, 'run.json'))).detachedTo, 'new-block');
+});
+
+test('a legacy session record does not stop the scan from reaching later runs', async t => {
+  const dir = await temporary(t), root = join(dir, 'rex-adapter', 'parent'), opened = [];
+  const h = harness(dir, [], { rex: {
+    inspect: async () => ({ window: 'w' }),
+    process: async () => ({ last_exit: { exit_code: 0 } }),
+    open: async manifest => { opened.push(manifest); return 'new-block'; },
+    control: async () => '',
+  } });
+  t.after(() => h.events.session_shutdown());
+  // Created first, so the scan walks it first: a promoted session record from the
+  // earlier in-place build. Its receipts used to be undefined, which threw inside
+  // the loop and left every later run unseen, so a promotion never happened.
+  await prepareRun(root, { kind: 'session', name: 'legacy', task: 'old', cwd: root, block: 'gone-block' }, '');
+  const run = await prepareRun(root, { kind: 'btw', name: 'aside', task: 'why', cwd: root, block: 'btw-block', anchor: 'parent-block' }, '');
+  await atomicJson(join(run.dir, 'promote-1.json'), { id: run.id, note: '', status: 'requested' });
+  await atomicJson(join(run.dir, 'exit.json'), { code: 0 });
+  // A corrupt record is treated as missing, not as a reason to stop scanning.
+  await writeFile(join(run.dir, 'activity.json'), '{not json');
+  await h.events.session_start({}, h.ctx);
+  await until(() => opened.length === 1);
+  assert.equal((await readJson(join(run.dir, 'run.json'))).detachedTo, 'new-block');
+});
+
 test('a promoted session is a conversation, not a task: no exit report and no rex_finish', async t => {
   const dir = await temporary(t), root = join(dir, 'rex-adapter', 'parent');
   const h = harness(dir); t.after(() => h.events.session_shutdown());

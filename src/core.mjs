@@ -66,8 +66,10 @@ export class Rex {
       : layout ? ['window', 'new', layout.title] : ['run'];
     args.push('-s', manifest.rexSession, '-c', manifest.cwd);
     if (split || !layout) args.push('--label', manifest.name);
-    args.push('--focus=false', '--keep-open', '--shell=none', '--json', '--',
-      ...(manifest.runtime === 'direct-pi' ? directPiCommand(manifest) : [process.execPath, runner, manifest.dir]));
+    args.push(`--focus=${manifest.focus ? 'true' : 'false'}`, '--keep-open', '--shell=none', '--json', '--',
+      ...(manifest.runtime === 'direct-pi' ? directPiCommand(manifest)
+        : manifest.runtime === 'parent-pi' ? parentPiCommand(manifest)
+        : [process.execPath, runner, manifest.dir]));
     const result = await this.json(args, signal);
     if (!Array.isArray(result.block_ids) || typeof result.block_ids[0] !== 'string') {
       throw new Error('Rex returned no block ID; inspect Rex before retrying.');
@@ -178,12 +180,6 @@ export class Rex {
     });
     return () => { stopped = true; lines.close(); child.kill(); };
   }
-  // A promoted side conversation keeps its block, so only its label changes.
-  async rename(manifest, label, signal) {
-    signal?.throwIfAborted();
-    if (!manifest.block) throw new Error('Block identity unknown; inspect Rex before retrying.');
-    return this.run(this.binary, ['block', 'rename', '-s', manifest.rexSession, manifest.block, label], signal);
-  }
   async control(manifest, action, signal) {
     signal?.throwIfAborted();
     if (!manifest.block) throw new Error('Block identity unknown; inspect Rex before retrying.');
@@ -216,7 +212,9 @@ export async function listRuns(root) {
   let names;
   try { names = await readdir(root); } catch (e) { if (e.code === 'ENOENT') return []; throw e; }
   const runs = await Promise.all(names.filter(n => /^[0-9a-f-]{36}$/.test(n)).map(n => readJson(join(root, n, 'run.json'))));
-  return runs.filter(Boolean);
+  // Oldest first, so a scan walks records in the order they were made rather than
+  // whatever order the filesystem returns.
+  return runs.filter(Boolean).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) || a.id.localeCompare(b.id));
 }
 // Another extension can register a user-message composer here, so a question
 // started by a command (which never fires Pi's input event) still carries the
@@ -260,9 +258,31 @@ export function piArgs(run, extension) {
   if (run.denyTools) args.push('--exclude-tools', run.denyTools);
   for (const skill of run.skills || []) args.push('--skill', skill);
   if (run.agentPrompt) args.push('--append-system-prompt', join(run.dir, 'agent.md'));
-  if (run.kind === 'btw') args.push('--tools', 'read,grep,find,ls', '--no-mcp');
+  // Narrowing a side conversation is the child's job, not a CLI flag: `--tools`
+  // filters the tool registry itself, so a tool it excludes is never registered
+  // and the pane could never grow past it. The child sets the read-only active
+  // set itself, at session_start and again before every run.
+  if (run.kind === 'btw') args.push('--no-mcp');
   args.push('--', `@${join(run.dir, 'prompt.md')}`);
   return args;
+}
+
+// A promoted side conversation continues as its own parent Pi: it resumes the
+// transcript the side pane wrote, keeps that pane's cwd and model, and loads the
+// adapter without PI_REX_RUN_DIR so it is a parent rather than a child. There is
+// no opening prompt, because the conversation is already in the session.
+export function parentPiCommand(manifest) {
+  const binary = manifest.piBin || 'pi';
+  const args = ['--session', manifest.sessionPath, '--name', manifest.name, '-e', manifest.extension];
+  if (manifest.model) args.push('--model', manifest.model);
+  if (manifest.thinking) args.push('--thinking', manifest.thinking);
+  // The resumed transcript records the side conversation's narrow loadout, and
+  // Pi restores it. Adding the parent's tools as `+name` modifiers widens that
+  // set; naming them plainly would make them an allowlist and prune the registry.
+  if (manifest.tools) args.push('--tools', manifest.tools);
+  if (manifest.promptFile) args.push('--', `@${manifest.promptFile}`);
+  return ['/usr/bin/env', ...(manifest.path ? [`PATH=${manifest.path}`] : []),
+    ...(/\.[cm]?js$/.test(binary) ? [process.execPath, binary] : [binary]), ...args];
 }
 
 // env replaces itself with Pi; no adapter supervisor remains in the PTY.

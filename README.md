@@ -53,7 +53,7 @@ Parent and child processes must share the same machine and filesystem. Remote Re
 | --- | --- |
 | `/btw <question>` | Opens a side conversation, or picks an open one to send the question to |
 | `/btw` | Focuses an open side conversation, picking which one when several are open |
-| `/promote [note]` | Inside a side conversation: turns it into a full session in the same pane |
+| `/promote [note]` | Inside a side conversation: hands it to its own full Pi session |
 | `/rex-agent <task>` | Starts an interactive Pi subagent in an Agents tab |
 | `/bg <command>` | Starts a background shell job as a minimized chip |
 | `/rex-tasks` | Opens the task manager overlay |
@@ -114,22 +114,30 @@ To send a conclusion back, run this **inside the side conversation**:
 
 Without arguments, it returns the last assistant answer. With arguments, it returns only that text. The conversation stays open and can return more conclusions later; ordinary answers are not automatically sent to the parent.
 
-BTW enables only `read,grep,find,ls` by default and disables MCP. This is a tool selection, not a security sandbox. Files are not automatically merged. To change the existing conversation's `cwd` or model, close it before creating another. A normally exited but retained BTW block is closed and replaced when a new question is submitted.
+A side conversation may only use `read,grep,find,ls` plus `web_enable`, and MCP is off for that process. Those are the *active* set, not a launch allowlist: every other tool stays registered and simply undeclared to the model. `web_enable` is pi-web-access's loader, so a side conversation can turn the web tools on when a question needs them without starting with them on; it is in the set mainly because the declaration this pane records has to name it for a promoted pane to keep it. Because registering a tool activates it, the narrowing is re-applied before every run, so an extension that registers its tools after startup still cannot widen a side conversation. This is a tool selection, not a security sandbox. Files are not automatically merged. To change the existing conversation's `cwd` or model, close it before creating another. A normally exited but retained BTW block is closed and replaced when a new question is submitted.
 
 ### Promoting a side conversation
 
-When a side conversation has found the answer and you want it to *act*, type `/promote` **inside that pane**. Nothing is closed, moved or relaunched: the same block, the same Pi process and the same transcript simply stop being a side conversation and become a session.
+A side conversation is a **child**: read-only tools, no delegation tools, no `/btw` of its own. When it has found the answer and you want it to *act*, type `/promote` **inside that pane** and it becomes a session you drive.
+
+A process cannot change what it was launched as, so promotion is a handoff rather than a relabelling. The side pane writes a request and waits; the main Pi accepts it, waits until Rex confirms that process is gone, opens a fresh Pi on the same transcript in a pane of the same shape and position, focused, and closes the old one. The child exits only after its request is accepted, so a main Pi that is still running an older adapter leaves the pane alive and says to `/reload` rather than stranding it. The conversation is preserved because the transcript is the conversation: the question, the files it read, its reasoning.
 
 ```text
 /promote
 /promote Fix the redirect and run the failing test
 ```
 
-The command switches on the tools your main pane has — the list is recorded when the side conversation opens, so it means *this Pi's* loadout rather than everything Pi ships. It then marks the run a session, changes the pane label to `Pi · <name>`, and refreshes the pane's own header. The conversation already remembers the question, the files it read and its reasoning, so there is nothing to re-explain. Bare `/promote` leaves it idle with your cursor in it; with arguments, that text is sent as the first message of the session, unexpanded, so text starting with `/` is not run as a command.
+What you get is an ordinary parent session: it keeps the side conversation's `cwd` and model, loads the adapter in parent mode, and therefore has `subagent`, `pipeline`, `bg_run`, `rex_finish`, its own `/btw`, `/rex-agent`, `/bg` and `/rex-tasks`, and every other extension tool. It also gets MCP, because this is a new process without `--no-mcp`. Its tool loadout starts as the promoting pane's loadout: the resumed transcript records the side conversation's narrow set, and Pi restores that, so the handoff adds the parent's tools as `+name` modifiers. That set names `web_enable`, which matters because pi-web-access hides its loader from resumed transcripts that declared their tools without it; without the loader a promoted pane would keep every tool it was handed but lose all web access. It has its own Pi session and its own run directory, so it is nobody else's child.
 
-Promotion is refused while an answer is still arriving, because the tool set would change under a turn already in flight. It happens at most once: the pane's own `/btw-return` then refuses, the `/btw` picker stops offering it, the main-page overview never counts it as work, and `rex_finish` will not close it — it is a conversation you drive, closed like any other pane. It is also user-only by construction: the command exists in the child Pi, and the `btw` tool never promotes, so no model can grant itself tools.
+Bare `/promote` opens the new session idle with your cursor in it; with arguments, that text is sent as its first message, unexpanded, so text starting with `/` is not run as a command. Promotion is refused while an answer is still arriving, because the handoff would close a Pi mid-turn. It is also user-only by construction: the command exists in the child Pi, and the `btw` tool never promotes. If nothing happens within a few seconds, the child withdraws its request and tells you to `/reload` the main Pi: the handoff needs both sides on the same adapter version, and staying alive is better than leaving a dead pane.
 
-Two consequences worth knowing. The process keeps the MCP setting it started with, so a promoted side conversation has no MCP tools even if the parent does; side conversations are launched with `--no-mcp`, so restart that pane from `/rex-agent` if you ever need them. And the opening line of the transcript still reads like a side conversation; it stays as history, and nothing rewrites the transcript.
+Three consequences worth knowing. The pane is replaced, not converted, so there is a visible moment where the old pane closes and the new one opens; if the new pane cannot be created, the note stays and the next scan retries, and the transcript is never lost. The old run record becomes history — the side conversation's `run.json` is marked closed and detached — so the original parent no longer lists or manages that pane. And the transcript's opening line still reads like a side conversation; it stays as history, and nothing rewrites it.
+
+If you would rather continue a side-conversation transcript as a plain Pi, without the adapter at all, `--session` alone is not enough: the transcript records its narrow tool set and Pi restores it. Name the tools to add, or the whole set you want:
+
+```text
+pi --session <run dir>/session.jsonl --tools +bash,+edit,+write
+```
 
 ## Interactive subagents
 
@@ -342,7 +350,7 @@ A real Rex shell smoke test verifies the command header, title, native working/d
 5. Finish several jobs together: receive a batch instead of a separate model turn for every result.
 6. Launch four agents, then three shell jobs: verify the agents form columns and then a 2x2 grid in one tab, while every job becomes its own minimized chip and the parent pane is unchanged.
 7. Ask another BTW question: verify that the picker lists the open side conversation and **＋ New side conversation**, that the question arrives in the same conversation, that `ctrl+n` in the picker splits a second pane, and that bare `/btw` picks which pane to focus.
-8. Inside a side conversation, run `/promote`: verify that the pane does not move, split or close, that its label becomes `Pi · <topic>`, and that `edit`, `write` and `bash` now work there. Try it while an answer is streaming and verify it refuses until the turn settles.
+8. Inside a side conversation, run `/promote`: verify that its pane is replaced by one labelled `Pi · <topic>` in the same place, that the conversation is still there, and that `/btw`, `subagent` and `edit` now work in it. Try it while an answer is streaming and verify it refuses until the turn settles.
 9. Verify that finishing an idle agent preserves its result and that its task, process, and block states remain distinct.
 10. Check that finished tasks leave the overview but remain in history. Shell panes close after delivery; agents wait for the main agent to finish them.
 11. Click a job's overview row while its chip is minimized: verify the chip pops open at its slot and the click never terminates the job.

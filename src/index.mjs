@@ -1,5 +1,5 @@
 import { watch } from 'node:fs';
-import { readdir, stat, rm } from 'node:fs/promises';
+import { readdir, stat, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Rex, rexExecutable, atomicJson, readJson, listRuns, prepareRun, composeUserMessage,
@@ -20,6 +20,9 @@ import { taskRow, showOverview, activeOverviewRows, visibleRows, orderRows, rowL
 import { agentSnapshot, agentBody, agentHeader, chainSnapshot, pipelineBody, pipelineHeader, fingerprint, component, spinning } from './transcript.mjs';
 
 const runner = fileURLToPath(new URL('./runner.mjs', import.meta.url));
+// The adapter hands its own file to the Pi it starts, so a promoted session loads
+// the same version as the parent that promoted it.
+const selfExtension = fileURLToPath(new URL('./index.mjs', import.meta.url));
 const textResult = value => ({ content: [{ type: 'text', text: JSON.stringify(value) }], details: value });
 const string = { type: 'string', minLength: 1 };
 const schema = (properties, required = []) => ({ type: 'object', properties, required, additionalProperties: false });
@@ -47,6 +50,10 @@ export default function adapter(pi, dependencies = {}) {
   const pending = new Map();
   const tracked = new Map(), cleanup = new Map(), cleanupErrors = new Map();
   let cleanupWorker, rescan = false, uiKey = 'empty', statusText, lifetime = new AbortController();
+  // Side conversations waiting for their process to be gone before their
+  // transcript is handed to a parent Pi, and the short poll that watches them.
+  const promoteWaits = new Map();
+  let promoteTimer;
   const signalFor = signal => signal ? AbortSignal.any([signal, lifetime.signal]) : lifetime.signal;
   const active = new Set();
   const toolDefinitions = new Map();
@@ -293,29 +300,43 @@ export default function adapter(pi, dependencies = {}) {
       runs: for (const [id, dir] of tracked) {
         if (epoch !== generation) return;
         if (closing.has(id)) continue;
-        const run = await readJson(join(dir, 'run.json'));
+        // One unreadable record must not stop the scan for every other run: a
+        // throw here used to skip the rest of the loop, and with it all delivery.
+        const guard = promise => promise.catch(() => undefined);
+        const run = await guard(readJson(join(dir, 'run.json')));
         if (!run) continue;
         processRuns.push(run);
         const [exit, activity, latestResult, files, usage] = await Promise.all([
-          readJson(join(dir, 'exit.json')), readJson(join(dir, 'activity.json')),
-          readJson(join(dir, 'result.json')), readdir(dir), readUsage(run.dir),
+          guard(readJson(join(dir, 'exit.json'))), guard(readJson(join(dir, 'activity.json'))),
+          guard(readJson(join(dir, 'result.json'))), guard(readdir(dir)).then(names => names ?? []), readUsage(run.dir),
         ]);
         if (epoch !== generation) return;
         if (run.kind === 'shell' && exit && run.block && !run.closed && delivered.has(`${id}/result.json`) && !cleanup.has(id)) cleanup.set(id, 0);
-        // A side conversation promoted from its own pane has already switched its
-        // tools on and retagged itself; this side only renames the pane and says
-        // so. Deleting the note is the acknowledgement, so it cannot repeat.
-        const promoteFile = run.kind === 'session' ? files.find(n => /^promote-.*\.json$/.test(n)) : undefined;
+        // /promote in a side pane asks for a real parent session, which cannot be
+        // the same process. The child waits for this side to accept its note, then
+        // leaves; the transcript is resumed by a fresh parent Pi once Rex confirms
+        // its process is gone, so two Pis never write the same session file.
+        const promoteFile = run.kind === 'btw' && !run.detachedTo
+          ? files.find(n => /^promote-.*\.json$/.test(n)) : undefined;
         if (promoteFile) {
           try {
-            await (await rex()).rename(run, `Pi · ${fit(run.name, 48)}`, lifetime.signal);
-            await rm(join(dir, promoteFile), { force: true });
-            if (epoch === generation && ctx.hasUI) ctx.ui.notify(ui('promoted', { name: run.name }), 'info');
+            const note = await readJson(join(dir, promoteFile));
+            if (note?.status === 'requested') {
+              await atomicJson(join(dir, promoteFile), { ...note, status: 'accepted', acceptedAt: new Date().toISOString() });
+              awaitPromote(run.id);
+            } else if (note?.status === 'accepted') {
+              if (exit || await childExited(run, lifetime.signal)) await detach(run, dir, promoteFile, lifetime.signal);
+              else awaitPromote(run.id);
+            }
           } catch (error) {
+            promoteWaits.delete(run.id);
             if (epoch === generation && ctx.hasUI) ctx.ui.setStatus('rex', `Rex: promote ${run.name}: ${error.message}`);
           }
         }
-        let receipts;
+        // A record with no receipts must still iterate: a promoted session kind
+        // once left this undefined, which threw inside the loop and stopped every
+        // later run in the same scan from being seen at all.
+        let receipts = [];
         if (run.kind === 'btw') receipts = files.filter(n => /^return-.*\.json$/.test(n));
         else if (run.kind === 'agent' && run.interactive) {
           receipts = files.filter(n => /^turn-.*\.json$/.test(n));
@@ -572,7 +593,8 @@ export default function adapter(pi, dependencies = {}) {
     overviewRows = []; uiKey = 'empty'; statusText = undefined;
     generation++; lifetime.abort(); lifetime = new AbortController();
     lifecycle?.stop(); lifecycle = undefined; lifecycleStarting = undefined;
-    clearInterval(timer); clearTimeout(debounce); clearTimeout(wakeTimer); wakeTimer = undefined; watcher?.close();
+    clearInterval(timer); clearInterval(promoteTimer); promoteTimer = undefined; promoteWaits.clear();
+    clearTimeout(debounce); clearTimeout(wakeTimer); wakeTimer = undefined; watcher?.close();
     watcher = undefined; timer = undefined; scanning = undefined; cleanupWorker = undefined;
     current = undefined; pending.clear(); inbox.clear(); tracked.clear(); cleanup.clear(); cleanupErrors.clear();
     chainSeen.clear(); chainWork.clear(); chainMap = new Map(); transcriptRows.clear(); clearInterval(spinTimer); spinTimer = undefined;
@@ -668,9 +690,6 @@ export default function adapter(pi, dependencies = {}) {
       }
       const options = applyRole(role, {
         owner: ctx.sessionManager.getSessionId(), kind, name, task, cwd: resolve(ctx.cwd, params.cwd || role?.cwd || '.'),
-        // A side conversation can become a full session in its own pane; the
-        // tools it should switch on are the ones this parent has right now.
-        ...(kind === 'btw' ? { promoteTools: pi.getActiveTools?.() ?? [] } : {}),
         runtime: kind === 'shell' ? 'shell-runner' : 'direct-pi',
         rexSession: process.env.REX_SESSION, anchor: process.env.REX_BLOCK,
         piBin: process.env.PI_REX_PI_BIN || process.argv[1] || 'pi',
@@ -731,6 +750,74 @@ export default function adapter(pi, dependencies = {}) {
         note: 'No output log is available for this task. Agent and BTW conversations use Pi sessions; use rex_tasks({id}) for the task result.' };
     }
   }
+  // Rex is the only authority on whether the child is gone. Its lifecycle stream
+  // can miss a program that ends on its own, and then no exit record is written
+  // at all, which is exactly how a promotion used to strand a dead pane.
+  async function childExited(run, signal) {
+    try {
+      const process = await (await rex()).process(run, signal);
+      return Boolean(process?.last_exit);
+    } catch (error) {
+      signal?.throwIfAborted();
+      if (error.code === 'REX_BLOCK_NOT_FOUND') return true;
+      throw error;
+    }
+  }
+  // A child that is shutting down needs a moment; poll it instead of waiting for
+  // the next five-second scan.
+  function awaitPromote(id) {
+    const epoch = generation;
+    if (!promoteWaits.has(id)) promoteWaits.set(id, Date.now() + 8000);
+    if (promoteTimer) return;
+    promoteTimer = setInterval(() => {
+      if (epoch !== generation) { clearInterval(promoteTimer); promoteTimer = undefined; promoteWaits.clear(); return; }
+      const now = Date.now();
+      for (const [waiting, deadline] of promoteWaits) if (now >= deadline) promoteWaits.delete(waiting);
+      if (!promoteWaits.size) { clearInterval(promoteTimer); promoteTimer = undefined; return; }
+      void reconcile();
+    }, 400);
+    promoteTimer.unref?.();
+  }
+  // The child wrote the note and quit; the transcript is closed and complete. A
+  // parent Pi resumes it in a pane split beside the dead one, so a failed open
+  // leaves the pane (and the note) in place to retry rather than losing both.
+  async function detach(run, dir, promoteFile, signal) {
+    const note = await readJson(join(dir, promoteFile)) ?? {};
+    const label = `Pi · ${fit(run.name, 48)}`;
+    const sessionPath = join(dir, 'session.jsonl');
+    const promptFile = join(dir, 'promote-prompt.md');
+    const prompt = String(note.note ?? '').trim();
+    if (prompt) await writeFile(promptFile, prompt, { mode: 0o600 });
+    else await rm(promptFile, { force: true });
+    const manifest = { kind: 'parent', runtime: 'parent-pi', name: label, extension: selfExtension,
+      sessionPath, ...(prompt ? { promptFile } : {}), cwd: run.cwd, model: run.model, thinking: run.thinking,
+      ...(pi.getActiveTools?.()?.length ? { tools: pi.getActiveTools().map(name => `+${name}`).join(',') } : {}),
+      piBin: process.env.PI_REX_PI_BIN || process.argv[1] || 'pi', path: process.env.PATH,
+      rexSession: run.rexSession, focus: true,
+      layout: { mode: 'split', anchor: run.block, direction: 'right', ratio: 50 } };
+    await withLayoutLock(root, async () => {
+      let block;
+      try {
+        block = await (await rex()).open(manifest, runner, signal);
+      } catch (error) {
+        // The dead pane can no longer anchor a split; the pane this side
+        // conversation was opened beside usually can.
+        signal.throwIfAborted();
+        manifest.layout.anchor = run.anchor;
+        block = await (await rex()).open(manifest, runner, signal);
+      }
+      // The new session has taken the space; the old pane is an empty shell now.
+      await (await rex()).control(run, 'close', signal).catch(() => {});
+      run.closed = true; run.detachedTo = block; run.detachedSession = sessionPath;
+      run.detachedAt = new Date().toISOString(); run.status = 'detached';
+      await atomicJson(join(dir, 'run.json'), run);
+    });
+    await rm(join(dir, promoteFile), { force: true });
+    promoteWaits.delete(run.id);
+    tracked.delete(run.id);
+    if (current?.hasUI) current.ui.notify(ui('detached', { name: label }), 'info');
+  }
+
   async function control(id, action, requestedSignal) {
     const signal = signalFor(requestedSignal); signal.throwIfAborted();
     const epoch = generation;

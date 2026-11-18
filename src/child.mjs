@@ -1,5 +1,5 @@
 import { watch } from 'node:fs';
-import { readdir } from 'node:fs/promises';
+import { readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { atomicJson, readJson, lastAssistant, messageText } from './core.mjs';
@@ -7,14 +7,21 @@ import { loadConfig } from './config.mjs';
 import { t } from './i18n.mjs';
 import { fit, softBlue } from './overview.mjs';
 
-// The tools a promoted session gets when the parent recorded no loadout, as for
-// a side conversation opened before promotion existed.
-const DEFAULT_PROMOTE_TOOLS = ['read', 'write', 'edit', 'bash', 'grep', 'find', 'ls'];
+// The tools a side conversation may use before promotion. It is set as the
+// active set, not as a launch flag, so every other tool stays registered and
+// /promote has something to switch on. web_enable rides along so the tool
+// declaration this pane records names pi-web-access's loader: a promoted pane
+// resumes this transcript, and that extension withholds the loader from
+// transcripts that declared their tools without it, which would otherwise cost
+// every promoted pane its web tools. Naming the loader only makes the web tools
+// available on demand, so the read-only default is unchanged.
+const BTW_TOOLS = ['read', 'grep', 'find', 'ls', 'web_enable'];
 
-export function registerChild(pi, dir) {
+export function registerChild(pi, dir, { promoteAcceptMs = 10_000 } = {}) {
   let context, watcher, timer, reading = false, ready = false, generation = 0, attempt, noticeTimer, lastSequence = 0;
+  let promoteWait;
   let language = 'en';
-  let assignment, childStatus;
+  let assignment, childStatus, runKind;
   const ui = (key, values) => t(language, key, values);
   const accepted = new Set();
   const activity = (task, process) => atomicJson(join(dir, 'activity.json'), { task, process, at: new Date().toISOString() });
@@ -97,8 +104,9 @@ export function registerChild(pi, dir) {
       context.ui.setStatus?.('rex-child', undefined);
       context.ui.setWidget?.('rex-assignment', undefined);
     }
-    assignment = undefined; childStatus = undefined;
-    context = undefined; watcher?.close(); clearInterval(timer); clearTimeout(noticeTimer); accepted.clear(); attempt = undefined;
+    assignment = undefined; childStatus = undefined; runKind = undefined;
+    context = undefined; watcher?.close(); clearInterval(timer); clearTimeout(noticeTimer);
+    clearInterval(promoteWait); promoteWait = undefined; accepted.clear(); attempt = undefined;
   }
   pi.on('session_start', async (_event, ctx) => {
     stop(); context = ctx; confirmInputs(ctx);
@@ -113,6 +121,11 @@ export function registerChild(pi, dir) {
     if (epoch !== generation) return;
     lastSequence = result?.sequence || 0;
     assignment = ['agent', 'btw', 'session'].includes(run?.kind) ? run : undefined;
+    runKind = run?.kind;
+    // A side conversation is narrowed here, because a launch flag would remove
+    // these tools from the registry instead of just deactivating them. A promoted
+    // session keeps whatever /promote enabled; a reload must not narrow it again.
+    if (runKind === 'btw') pi.setActiveTools?.(BTW_TOOLS);
     showAssignment(ctx);
     showState(!ready ? 'launching' : !ctx.isIdle() ? 'running' : result?.status || 'idle');
     if (run && run.inputProtocol !== 1) { run.inputProtocol = 1; await atomicJson(join(dir, 'run.json'), run); }
@@ -123,6 +136,12 @@ export function registerChild(pi, dir) {
   pi.on('session_shutdown', stop);
   pi.on('message_end', event => {
     if (event.message?.role === 'user') setTimeout(() => { if (context) confirmInputs(context); }, 0);
+  });
+  // Registering a tool activates it, and other extensions can register theirs
+  // after session_start, so the narrowing is applied again where it covers this
+  // run. Without this a side conversation silently keeps a search tool.
+  pi.on('before_agent_start', () => {
+    if (runKind === 'btw') pi.setActiveTools?.(BTW_TOOLS);
   });
   pi.on('agent_start', () => { showState('running'); return activity('running', 'running'); });
   pi.on('agent_settled', async (event, ctx) => {
@@ -155,36 +174,39 @@ export function registerChild(pi, dir) {
     },
   });
   // Promotion is typed by the person sitting in this pane, never called by a
-  // model, so no agent can grant itself tools. It is the same process, the same
-  // block and the same transcript: only the tool set and the record's kind
-  // change, which is why no pane is opened or closed here.
+  // model. A child process cannot become a parent: it has no delegation tools and
+  // no /btw, and those are decided at launch. So this side asks the parent to
+  // hand the conversation to a fresh parent Pi and then exits on its own, which
+  // is also what closes the transcript cleanly before another Pi opens it.
   pi.registerCommand('promote', {
-    description: 'Turn this side conversation into a full session with every tool',
+    description: 'Hand this side conversation to its own full Pi session',
     handler: async (args, ctx) => {
       const run = await readJson(join(dir, 'run.json'));
       if (run?.kind !== 'btw') return ctx.ui.notify(ui('promoteOnly'), 'warning');
-      // Mid-answer promotion would swap the tools under a turn already running.
       if (!ctx.isIdle()) return ctx.ui.notify(ui('promoteBusy'), 'warning');
-      const known = new Set((pi.getAllTools?.() ?? []).filter(tool => tool.exposure !== 'hidden').map(tool => tool.name));
-      const registered = names => known.size ? names.filter(name => known.has(name)) : names;
-      const requested = Array.isArray(run.promoteTools) && run.promoteTools.length ? run.promoteTools : DEFAULT_PROMOTE_TOOLS;
-      const enabled = registered(requested);
-      // Never leave the pane without a tool: a parent that recorded nothing this
-      // process has keeps the core set instead of switching everything off.
-      const wanted = enabled.length ? enabled : registered(DEFAULT_PROMOTE_TOOLS);
-      pi.setActiveTools?.(wanted);
-      const promoted = { ...run, kind: 'session', promotedAt: new Date().toISOString(), promotedTools: wanted };
-      await atomicJson(join(dir, 'run.json'), promoted);
-      // The parent owns Rex and the pane label; this note is its one instruction.
-      await atomicJson(join(dir, `promote-${randomUUID()}.json`),
-        { id: run.id, name: run.name, tools: wanted, requestedAt: promoted.promotedAt, status: 'promoted' });
-      assignment = promoted; childStatus = undefined;
-      showAssignment(ctx); showState('idle');
       const note = String(args ?? '').trim();
-      // A note is the first message of the session; expandPromptTemplates stays off
-      // so text beginning with "/" is not run as a command.
-      if (note) pi.sendUserMessage(note, { expandPromptTemplates: false });
-      ctx.ui.notify(ui(note ? 'promotedNote' : 'promotedIdle'), 'info');
+      const file = join(dir, `promote-${randomUUID()}.json`);
+      await atomicJson(file, { id: run.id, name: run.name, note, requestedAt: new Date().toISOString(), status: 'requested' });
+      ctx.ui.notify(ui('promoteDetaching'), 'info');
+      // Leaving immediately would strand the pane whenever the main Pi is still
+      // running an older adapter and never answers. Wait for it to accept, then
+      // hand over the transcript; if nothing answers, say what to do and stay.
+      const epoch = generation, deadline = Date.now() + promoteAcceptMs;
+      clearInterval(promoteWait);
+      promoteWait = setInterval(async () => {
+        if (epoch !== generation) { clearInterval(promoteWait); promoteWait = undefined; return; }
+        const current = await readJson(file).catch(() => undefined);
+        if (current?.status === 'accepted') {
+          clearInterval(promoteWait); promoteWait = undefined;
+          ctx.shutdown?.();
+          return;
+        }
+        if (Date.now() < deadline) return;
+        clearInterval(promoteWait); promoteWait = undefined;
+        await rm(file, { force: true }).catch(() => {});
+        ctx.ui.notify(ui('promoteStale'), 'warning');
+      }, 200);
+      promoteWait.unref?.();
     },
   });
 }
