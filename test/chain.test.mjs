@@ -353,3 +353,58 @@ test('a step line marks a cut sentence and does not repeat the state as a reason
   assert.match(chainSummary(chain, { artifacts: '/tmp/c' }).split('\n')[1], / — Operation aborted$/,
     'a reason that is not the state word is still shown');
 });
+
+test('a launch name is two words, so a tab title stays a strip and not a sentence', async t => {
+  const client = fakeRex();
+  const h = await fixture(t, client);
+  const error = async params => JSON.parse((await h.call('subagent', params)).content[0].text).error;
+  assert.match(await error({ task: 'Review the change', label: 'Review plan vs code', name: 'map the auth flow' }),
+    /name must be 2 words or fewer, got 4/);
+  assert.equal(client.calls.open.length, 0, 'a rejected name never opens a pane');
+  const named = await h.call('subagent', { task: 'Review the change', label: 'Review plan vs code', name: 'auth-research' });
+  const record = JSON.parse(await readFile(join(h.root, named.details.id, 'run.json'), 'utf8'));
+  assert.equal(record.name, 'auth-research');
+  assert.equal(record.named, true, 'a name the caller wrote is worth showing beside the goal');
+});
+
+test('a name a live pane carries is taken until that pane closes', async t => {
+  const client = fakeRex();
+  const h = await fixture(t, client);
+  const launch = params => h.call('subagent', params).then(r => JSON.parse(r.content[0].text));
+
+  const first = await launch({ task: 'Map the auth flow', label: 'Map the auth flow', name: 'auth-research' });
+  assert.equal(first.status, 'running');
+
+  const taken = await launch({ task: 'Map the session schema', label: 'Map session schema', name: 'auth-research' });
+  assert.match(taken.error, /name "auth-research" is already carried by live/);
+  assert.equal(client.calls.open.length, 1, 'a taken name never opens a second pane');
+
+  const other = await launch({ task: 'Map the session schema', label: 'Map session schema', name: 'auth-schema' });
+  assert.equal(other.status, 'running', 'a different name is free while the first runs');
+
+  // Closing is what frees the handle: a closed pane is not a place to look for.
+  await h.call('rex_control', { id: first.id, action: 'close' });
+  await h.boundary();
+  await until(async () => !(await launch({ task: 'Map the auth flow', label: 'Map auth again', name: 'auth-research' })).error,
+    'the closed name to be free again');
+});
+
+test('a side conversation is exempt from the name a live task holds', async t => {
+  const client = fakeRex();
+  const h = await fixture(t, client);
+  const launch = (tool, params) => h.call(tool, params).then(r => JSON.parse(r.content[0].text));
+
+  const task = await launch('subagent', { task: 'Map the auth flow', label: 'Map the auth flow', name: 'auth-research' });
+  assert.equal(task.status, 'running');
+
+  // btw is one reused pane, not a task you compare against, so the handle it
+  // shares with a live task is not a collision.
+  const aside = await launch('btw', { task: 'What does the name rule protect?', name: 'auth-research' });
+  assert.equal(aside.error, undefined, 'a side conversation is never refused a name');
+  assert.equal(aside.status, 'running');
+
+  // And it does not take the handle either: a task may still claim it after.
+  const other = await launch('subagent', { task: 'Map the session schema', label: 'Map session schema', name: 'auth-schema' });
+  assert.equal(other.status, 'running');
+  assert.equal(client.calls.open.length, 3);
+});

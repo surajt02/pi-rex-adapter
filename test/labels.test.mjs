@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MAX_LABEL_WORDS, checkLabel, deriveLabel, requireLabel, resolveLabel } from '../src/labels.mjs';
+import { MAX_LABEL_WORDS, MAX_NAME_CHARS, MAX_NAME_WORDS, checkLabel, checkName, deriveLabel, requireLabel, resolveLabel } from '../src/labels.mjs';
 
 test('a label is one line of six words or fewer, and seven is an error rather than a silent trim', () => {
   assert.deepEqual(checkLabel('Read chain persistence'), { ok: true, label: 'Read chain persistence' });
@@ -56,4 +56,28 @@ test('resolveLabel prefers an explicit label and falls back to the task', () => 
   assert.equal(resolveLabel({ task: 'Write probe script' }), 'Write probe script');
   assert.equal(resolveLabel({ label: 'too many words in this label here', task: 'Write probe script' }), 'Write probe script');
   assert.equal(resolveLabel({}), 'Task');
+});
+
+test('a name is one line of two words or fewer, and three is an error rather than a silent cut', () => {
+  assert.deepEqual(checkName('auth-research'), { ok: true, name: 'auth-research' });
+  assert.deepEqual(checkName('auth research'), { ok: true, name: 'auth research' });
+  assert.deepEqual(checkName('  auth   research '), { ok: true, name: 'auth research' });
+  const many = checkName('map the authentication flow');
+  assert.equal(many.ok, false);
+  assert.match(many.reason, new RegExp(`must be ${MAX_NAME_WORDS} words or fewer, got 4`));
+  assert.match(many.reason, /"map the authentication flow"/);
+  assert.equal(checkName('auth\nresearch').ok, false);
+  // A launch without a name is normal: it is named from its task instead.
+  assert.deepEqual(checkName(''), { ok: true, name: undefined });
+  assert.deepEqual(checkName(undefined), { ok: true, name: undefined });
+});
+
+test('a handle long enough to push the goal out of its column is not a handle', () => {
+  const long = 'supercalifragilisticexpialidocious';
+  const check = checkName(long);
+  assert.equal(check.ok, false);
+  assert.match(check.reason, new RegExp(`must be ${MAX_NAME_CHARS} characters or fewer, got ${long.length}`));
+  const atLimit = 'a'.repeat(MAX_NAME_CHARS);
+  assert.deepEqual(checkName(atLimit), { ok: true, name: atLimit });
+  assert.equal(checkName('a'.repeat(MAX_NAME_CHARS + 1)).ok, false);
 });

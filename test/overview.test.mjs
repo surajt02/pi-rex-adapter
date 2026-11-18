@@ -68,7 +68,9 @@ test('main-page widget shows active agents and shell tasks only; can hide and re
   }
   await h.events.session_start({}, h.ctx); await h.boundary();
   const widget = h.widgets.at(-1);
-  assert.equal(widget[2].placement, 'aboveEditor');
+  // The slot's default placement; WIDGET_ORDER decides where in it the rows sit.
+  assert.equal(widget[2], undefined);
+  assert.ok(globalThis[Symbol.for('pi:above-editor-widgets')].has('rex-tasks'));
   const lines = widget[1]().render(120).join('\n');
   for (const kind of ['agent', 'shell']) assert.match(lines, new RegExp(`${kind} delegated task`));
   assert.doesNotMatch(lines, /BTW|btw delegated|Pi idle|Closed/);
@@ -455,4 +457,18 @@ test('each row keeps its own target, so a click lands on the row under the curso
   const focused = h.calls.filter(call => call[1] === 'focus').map(call => call[0].block);
   assert.deepEqual(new Set(focused), new Set([first.block, second.block]), 'two rows, two panes');
   assert.equal(new Set(focused).size, 2, 'the second row did not repeat the first row\'s target');
+});
+
+test('a named task says its name once, and only when a role did not push it out', () => {
+  const row = over => ({ id: 'x', kind: 'agent', name: 'auth-research', named: true, taskState: 'running',
+    label: 'Map the auth flow', createdAt: new Date().toISOString(), tokens: 12, ...over });
+  const withRole = overviewLines([row({ role: 'scout' })], 80, null, 'en', new Map()).join('\n');
+  assert.match(withRole, /auth-research · Map the auth flow/);
+  // With no role the column is already the name, so the label must not repeat it.
+  const noRole = overviewLines([row({})], 80, null, 'en', new Map()).join('\n');
+  assert.match(noRole, /auth-research {2,}Map the auth flow/);
+  assert.doesNotMatch(noRole, /auth-research · Map/);
+  const unnamed = overviewLines([row({ role: 'scout', named: false })], 80, null, 'en', new Map()).join('\n');
+  assert.match(unnamed, /scout +Map the auth flow/);
+  assert.doesNotMatch(unnamed, /auth-research · Map/);
 });

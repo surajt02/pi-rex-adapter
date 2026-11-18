@@ -476,3 +476,28 @@ test('a running row animates on its own, and stops when the run settles', async 
   await delay(FRAME_MS * 4);
   assert.equal(repaints, settled, 'a settled row must stop repainting');
 });
+
+test('the first paint names the launch, and only a name that was written counts', async t => {
+  inRex(t);
+  const h = await fixture(t, {
+    async open() { return 'block-1'; },
+    async inspect() { return { window: 'window-1' }; },
+    async control() {},
+    events() { return () => {}; },
+  });
+  await h.events.session_start({}, h.ctx);
+  const theme = { fg: (token, text) => `<${token}>${text}`, bold: text => `<b>${text}</b>` };
+  const context = { toolCallId: 'call', expanded: false, invalidate() {}, keyHint: () => '' };
+  // Pi paints the call row before any scan can read the run, so the arguments
+  // have to carry the name too, or the row arrives anonymous and stays that way.
+  const plain = line => line.replace(/<\/?[a-z]+>/g, '');
+  const header = plain(h.tools.subagent.renderCall({ task: 'Map the auth flow', label: 'Map the auth flow', name: 'auth-research' }, theme, context).render(100)[0]);
+  assert.match(header, /auth-research · Map the auth flow/);
+  const unnamed = { task: 'Map the auth flow', label: 'Map the auth flow' };
+  assert.doesNotMatch(plain(h.tools.subagent.renderCall(unnamed, theme, context).render(100)[0]), / · /,
+    'a derived name is a fragment of the goal, so the row leaves it out');
+  // The flag is decided by whether a name was written, not by the call saying so.
+  const started = await h.call('subagent', { ...unnamed, named: true });
+  const record = JSON.parse(await readFile(join(h.root, started.details.id, 'run.json'), 'utf8'));
+  assert.equal(record.named, false);
+});

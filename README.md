@@ -245,7 +245,7 @@ The overview reflects the child's last reported activity. Opening it does not in
 
 | Tool | Parameters and behavior |
 | --- | --- |
-| `subagent` | `task,label`; optional `agent,name,cwd,model,fork`. Starts an interactive Pi with automatic reports; the launch appears in the transcript with live state, turns, tool uses and tokens. `label` is required and must be six words or fewer: it is the goal shown in the parent list. `agent` picks a role from `~/.pi/agent/agents/*.md`. |
+| `subagent` | `task,label`; optional `agent,name,cwd,model,fork`. Starts an interactive Pi with automatic reports; the launch appears in the transcript with live state, turns, tool uses and tokens. `label` is required and must be six words or fewer: it is the goal shown in the parent list. `name` is optional and must be one or two words: it is the handle its tab carries, and a launch without one is named from its task. `agent` picks a role from `~/.pi/agent/agents/*.md`. |
 | `btw` | The same optional fields; omit `task` to focus, or supply a question to reuse the right-side conversation. A tool launch always reuses the most recent side conversation instead of opening the user's picker. Reports are explicit. |
 | `pipeline` | `steps[]` of `{agent,task,label,model}`, plus optional `title,cwd,model,fork`. Runs the steps in order, one pane each, and delivers one combined report. Every step needs a label of six words or fewer. |
 | `bg_run` | `command`; optional `name,cwd`. Starts a shell job with automatic completion delivery. |

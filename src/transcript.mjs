@@ -118,7 +118,13 @@ function previewLines(agent, at, expanded, width) {
 // separate "launched" line to read.
 export function agentHeader(agent, { now = Date.now(), hint } = {}) {
   const [symbol, token] = stateGlyph(agent.state, now);
-  const line = [[symbol, token], [' ', null], [plain(agent.label || 'agent'), 'bold']];
+  const line = [[symbol, token], [' ', null]];
+  // A name the caller chose leads the row, with the goal after it. An unnamed
+  // launch has only a derived name cut from its task, which reads as a fragment
+  // of the goal rather than a handle, so it stays out of the row.
+  const name = agent.named ? plain(agent.name) : '';
+  if (name) line.push([name, 'bold'], [' · ', 'dim']);
+  line.push([plain(agent.label || 'agent'), name ? undefined : 'bold']);
   if (agent.role) line.push([' ', null], [`(${plain(agent.role)})`, 'muted']);
   if (hint) line.push([' ', null], [`(${hint})`, 'dim']);
   return [line];
@@ -143,7 +149,10 @@ export function pipelineBody({ agents }, { width, expanded, now = Date.now() } =
   agents.forEach((agent, index) => {
     const last = index === agents.length - 1;
     const [symbol, token] = stateGlyph(agent.state, now);
-    const row = [indent(2), [last ? '└ ' : '├ ', 'dim'], [symbol, token], [' ', null], [plain(agent.label || 'agent'), 'bold']];
+    const row = [indent(2), [last ? '└ ' : '├ ', 'dim'], [symbol, token], [' ', null]];
+    const name = agent.named ? plain(agent.name) : '';
+    if (name) row.push([name, 'bold'], [' · ', 'dim']);
+    row.push([plain(agent.label || 'agent'), name ? undefined : 'bold']);
     if (agent.role) row.push([' ', null], [`(${plain(agent.role)})`, 'muted']);
     lines.push(row, statsLine(agent, width, 6), ...previewLines(agent, 8, expanded, width));
   });
@@ -151,7 +160,7 @@ export function pipelineBody({ agents }, { width, expanded, now = Date.now() } =
 }
 
 export const agentSnapshot = agent => ({
-  label: agent.label, role: agent.role, model: agent.model, state: agent.state,
+  label: agent.label, name: agent.name, named: agent.named, role: agent.role, model: agent.model, state: agent.state,
   tokens: agent.tokens, turns: agent.turns, toolUses: agent.toolUses, seconds: agent.seconds,
   actions: agent.actions, text: agent.text,
 });
@@ -173,7 +182,7 @@ export function chainSnapshot(record, previous) {
     agents: steps.map((step, index) => {
       const kept = before[index] || {};
       return agentSnapshot({
-        label: step.label || kept.label, role: step.agent || kept.role, model: kept.model,
+        label: step.label || kept.label, name: kept.name, named: kept.named, role: step.agent || kept.role, model: kept.model,
         state: step.status, tokens: kept.tokens, turns: kept.turns, toolUses: kept.toolUses,
         seconds: kept.seconds, actions: kept.actions, text: step.text || kept.text,
       });
@@ -185,7 +194,7 @@ export function chainSnapshot(record, previous) {
 // chain.json, so a step finishing can move the header while every agent row is
 // already settled — and a row that only hashes its agents keeps the old count.
 export const fingerprint = (agents, progress = '') => JSON.stringify([progress, agents.map(agent => [
-  agent.label, agent.role, agent.state, agent.tokens, agent.turns, agent.toolUses, agent.seconds,
+  agent.label, agent.name, agent.named, agent.role, agent.state, agent.tokens, agent.turns, agent.toolUses, agent.seconds,
   Array.isArray(agent.actions) ? agent.actions.length : 0,
   agent.text ? String(agent.text).length : 0,
 ])]);

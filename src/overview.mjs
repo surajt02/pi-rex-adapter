@@ -4,6 +4,41 @@ import { t } from './i18n.mjs';
 import { deriveLabel } from './labels.mjs';
 import { STATS_WIDTH, alignRow, measure, statsBlank, statsText } from './columns.mjs';
 
+/**
+ * Fixed top-to-bottom order for the widgets that share the above-editor slot.
+ *
+ * Pi renders that slot in the order each widget was last set, and setting a widget
+ * moves it to the bottom, so whichever extension happened to run last used to decide
+ * the order. Every change therefore republishes the whole stack in this order. The
+ * task rows lead, furthest from the editor; the notes come next, and the snippet
+ * toggles sit closest to it. Extensions that are not loaded have no slot and are
+ * skipped, so each of them carries its own copy of this without a shared module.
+ */
+export const WIDGET_ORDER = ['rex-tasks', 'turn-notes', 'prompt-snippets'];
+export const WIDGET_SLOTS = Symbol.for('pi:above-editor-widgets');
+
+export function setWidgetInOrder(ctx, key, content) {
+  const host = globalThis;
+  const slots = host[WIDGET_SLOTS] ?? new Map();
+  host[WIDGET_SLOTS] = slots;
+  slots.set(key, content);
+  for (const id of WIDGET_ORDER) {
+    if (!slots.has(id)) continue;
+    ctx.ui.setWidget(id, slots.get(id));
+  }
+}
+
+/** Whether a widget ordered above this one is showing, so this one has to separate itself. */
+export function hasContentAbove(key) {
+  const slots = globalThis[WIDGET_SLOTS];
+  if (!slots) return false;
+  for (const id of WIDGET_ORDER) {
+    if (id === key) return false;
+    if (slots.get(id) !== undefined) return true;
+  }
+  return false;
+}
+
 export function plain(value) {
   return stripVTControlCharacters(String(value ?? '')).replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim();
 }
@@ -166,8 +201,13 @@ function stepLine(step, { connector, last, roleWidth, width, theme, language, no
   const color = token => (text => paint(token, text));
   const [symbol, token] = glyph(step.state, now);
   const prefix = connector ? ['   ', last ? '└ ' : '├ '] : ['   ', ''];
-  const cell = roleText(step).padEnd(roleWidth + (connector ? 2 : 4));
-  const label = plain(step.label);
+  const shown = roleText(step);
+  const cell = shown.padEnd(roleWidth + (connector ? 2 : 4));
+  // With no role to show, the column is already the name, so only a row whose
+  // role pushed the name out has to say it again beside the goal.
+  const stepName = step.row?.named && shown !== plain(step.row.name) ? plain(step.row.name) : '';
+  const goal = plain(step.label);
+  const label = stepName ? (goal ? `${stepName} · ${goal}` : stepName) : goal;
   const segments = [
     [prefix[0], color('dim')], [prefix[1], color('dim')], [symbol, color(token)], [' ', undefined],
     [cell, color('muted')], [label, undefined],
@@ -229,10 +269,10 @@ export function overviewLines(rows, width, theme, language = 'en', chains, hits)
 export function showOverview(ctx, rows, enabled, language = 'en', chains, options) {
   if (!ctx?.hasUI) return;
   if (!enabled || !visibleRows(rows).length) {
-    ctx.ui.setWidget('rex-tasks', undefined, { placement: 'aboveEditor' });
+    setWidgetInOrder(ctx, 'rex-tasks', undefined);
     return;
   }
-  ctx.ui.setWidget('rex-tasks', (tui, theme) => {
+  setWidgetInOrder(ctx, 'rex-tasks', (tui, theme) => {
     const targets = new Map();
     const component = {
       render(width) {
@@ -265,5 +305,5 @@ export function showOverview(ctx, rows, enabled, language = 'en', chains, option
       component.clock.unref?.();
     }
     return component;
-  }, { placement: 'aboveEditor' });
+  });
 }

@@ -191,3 +191,37 @@ test('an interrupted step with no usage record claims no token count', () => {
   assert.doesNotMatch(facts, /token/, 'nothing was measured, so nothing is reported');
   assert.match(facts, /8s/);
 });
+
+test('a named launch leads with its name and keeps the goal beside it', () => {
+  const [named] = flat(agentHeader(agent({ name: 'auth-research', named: true }), { now: 0 }));
+  assert.match(named, /^● auth-research · List overview exports \(scout\)$/);
+  // A derived name is a fragment of the task, not a handle the parent chose, so
+  // it stays out of the row and the goal stands alone.
+  const [derived] = flat(agentHeader(agent({ name: 'List overview exports in the repo', named: false }), { now: 0 }));
+  assert.match(derived, /^● List overview exports \(scout\)$/);
+  const [unnamed] = flat(agentHeader(agent(), { now: 0 }));
+  assert.match(unnamed, /^● List overview exports \(scout\)$/);
+});
+
+test('a pipeline step shows the name its pane was given', () => {
+  const [step] = flat(pipelineBody({ agents: [agent({ name: 'auth-research', named: true })] }, { width: 120, now: 0 }));
+  assert.match(step, /auth-research · List overview exports \(scout\)$/);
+});
+
+test('a renamed launch repaints its row', () => {
+  const one = fingerprint([agentSnapshot(agent({ name: 'auth-research', named: true }))]);
+  const two = fingerprint([agentSnapshot(agent({ name: 'auth-schema', named: true }))]);
+  assert.notEqual(one, two, 'a name that changed has to reach the row');
+});
+
+test('a snapshot carries the name and whether the parent chose it', () => {
+  assert.deepEqual(
+    { name: agentSnapshot(agent({ name: 'auth-research', named: true })).name, named: agentSnapshot(agent({ name: 'auth-research', named: true })).named },
+    { name: 'auth-research', named: true });
+});
+
+test('a launch that stops counting as named repaints, even with the same text', () => {
+  const named = fingerprint([agentSnapshot(agent({ name: 'auth-research', named: true }))]);
+  const derived = fingerprint([agentSnapshot(agent({ name: 'auth-research', named: false }))]);
+  assert.notEqual(named, derived, 'named decides whether the row shows the name at all');
+});

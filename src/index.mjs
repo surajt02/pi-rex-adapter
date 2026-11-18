@@ -10,7 +10,7 @@ import { windowOf } from './grid.mjs';
 import { discoverRoles, findRole, applyRole, roleSummary } from './roles.mjs';
 import { MAX_STEPS, createChain, readChain, writeChain, chainSummary, composeTask, stepLabel, chainDirectory } from './chain.mjs';
 import { registerChild } from './child.mjs';
-import { checkLabel, deriveLabel, resolveLabel } from './labels.mjs';
+import { checkLabel, checkName, deriveLabel, resolveLabel } from './labels.mjs';
 import { readUsage } from './usage.mjs';
 import { directRun, observeLifecycles, stalledLaunch } from './lifecycle.mjs';
 import { createDialogs } from './dialog.mjs';
@@ -56,6 +56,11 @@ export default function adapter(pi, dependencies = {}) {
   let promoteTimer;
   const signalFor = signal => signal ? AbortSignal.any([signal, lifetime.signal]) : lifetime.signal;
   const active = new Set();
+  // A name that a live pane carries, so a second launch cannot quietly take it.
+  // The scan prunes this wherever it drops a tracked run, because closing a pane
+  // is what frees the handle.
+  const claimed = new Map();
+  const releaseName = id => { for (const [name, holder] of claimed) if (holder === id) claimed.delete(name); };
   const toolDefinitions = new Map();
   let controlsDirect = false;
   let rexPromise;
@@ -173,7 +178,7 @@ export default function adapter(pi, dependencies = {}) {
       const row = overviewRows.find(candidate => candidate.id === entry.runId);
       if (!row) return undefined;
       return { agents: [agentSnapshot({
-        label: row.label, role: row.role, model: row.model, state: row.taskState,
+        label: row.label, name: row.name, named: row.named, role: row.role, model: row.model, state: row.taskState,
         tokens: row.tokens, turns: row.turns, toolUses: row.toolUses, actions: row.actions,
         seconds: row.endedAt ? elapsedSeconds(row) : undefined, text: row.result,
       })] };
@@ -181,7 +186,7 @@ export default function adapter(pi, dependencies = {}) {
     const group = buildGroups(overviewRows, chainMap).groups.find(candidate => candidate.id === entry.chainId);
     if (!group) return chainSnapshot(chainMap.get(entry.chainId), entry.snapshot);
     return { title: group.title, done: group.done, total: group.total, agents: group.steps.map(step => agentSnapshot({
-      label: step.label, role: step.row?.role || step.agent, model: step.row?.model, state: step.state,
+      label: step.label, name: step.row?.name, named: step.row?.named, role: step.row?.role || step.agent, model: step.row?.model, state: step.state,
       tokens: step.row?.tokens, turns: step.row?.turns, toolUses: step.row?.toolUses,
       actions: step.row?.actions,
       seconds: step.row?.endedAt ? elapsedSeconds(step.row) : undefined,
@@ -305,6 +310,9 @@ export default function adapter(pi, dependencies = {}) {
         const guard = promise => promise.catch(() => undefined);
         const run = await guard(readJson(join(dir, 'run.json')));
         if (!run) continue;
+        // A closed pane is not a place to look for, whether or not its record is
+        // still tracked to deliver a last receipt, so the handle frees here.
+        if (run.closed) releaseName(id);
         processRuns.push(run);
         const [exit, activity, latestResult, files, usage] = await Promise.all([
           guard(readJson(join(dir, 'exit.json'))), guard(readJson(join(dir, 'activity.json'))),
@@ -393,7 +401,7 @@ export default function adapter(pi, dependencies = {}) {
           const row = taskRow(run, exit, latestResult, activity, config.language);
           const settled = ['completed', 'failed', 'interrupted', 'cancelled'].includes(row.taskState);
           rows.push({ ...row, task: fit(run.task || '', 240), summary: undefined, cleanupError: cleanupErrors.get(id),
-            label: resolveLabel(run), role: run.role, chain: run.chain, model: run.model,
+            label: resolveLabel(run), role: run.role, named: Boolean(run.named), chain: run.chain, model: run.model,
             tokens: usage.tokens, actions: usage.actions, turns: usage.turns, toolUses: usage.toolUses,
             result: latestResult?.text ? String(latestResult.text).slice(0, 4000) : undefined,
             endedAt: settled ? latestResult?.createdAt || exit?.at : undefined });
@@ -494,7 +502,7 @@ export default function adapter(pi, dependencies = {}) {
     await writeChain(chainRoot, chain);
     const result = await launch('agent', {
       task: composeTask(chain, step.index), agent: step.agent, label: step.label,
-      name: `${stepLabel(step, total)} · ${chain.title}`.slice(0, 64),
+      name: `${stepLabel(step, total)} · ${chain.title}`.slice(0, 64), named: false,
       cwd: chain.cwd, model: step.model || chain.model, fork: chain.fork,
       chain: { id: chain.id, index: step.index, total, title: chain.title },
     }, ctx, requestedSignal);
@@ -596,7 +604,7 @@ export default function adapter(pi, dependencies = {}) {
     clearInterval(timer); clearInterval(promoteTimer); promoteTimer = undefined; promoteWaits.clear();
     clearTimeout(debounce); clearTimeout(wakeTimer); wakeTimer = undefined; watcher?.close();
     watcher = undefined; timer = undefined; scanning = undefined; cleanupWorker = undefined;
-    current = undefined; pending.clear(); inbox.clear(); tracked.clear(); cleanup.clear(); cleanupErrors.clear();
+    current = undefined; pending.clear(); inbox.clear(); tracked.clear(); claimed.clear(); cleanup.clear(); cleanupErrors.clear();
     chainSeen.clear(); chainWork.clear(); chainMap = new Map(); transcriptRows.clear(); clearInterval(spinTimer); spinTimer = undefined;
   }
   pi.on('session_shutdown', stop);
@@ -663,7 +671,22 @@ export default function adapter(pi, dependencies = {}) {
     // parent list is a column of goals, and a long task string erodes it.
     const label = checkLabel(params.label);
     if (kind === 'agent' && !label.ok) throw new Error(label.reason);
-    const name = params.name?.trim() || fit(task?.split('\n')[0] || kind, 48);
+    // The name is the handle its tab carries; the label is the goal. A name the
+    // adapter composes for itself (a pipeline step) is a description and is never
+    // held to the two-word rule, so `named` travels with the launch instead.
+    const chosen = params.name?.trim();
+    const name = chosen || fit(task?.split('\n')[0] || kind, 48);
+    // A name identifies a pane, so two live tasks cannot carry one: their rows
+    // would say the same thing and point at different places. Closing frees it.
+    // A side conversation is one reused pane rather than a task to compare against,
+    // so it stays out of the namespace entirely: btw is neither refused a name a
+    // live task holds nor allowed to hold one.
+    const claims = chosen && kind !== 'btw' ? chosen : undefined;
+    if (claims) {
+      const held = [...overviewRows].find(row => !row.closed && row.name === claims)
+        ?? (claimed.has(claims) ? { id: claimed.get(claims), kind: 'pane' } : undefined);
+      if (held) throw new Error(`name "${claims}" is already carried by live ${held.kind} ${held.id.slice(0, 8)}; close it or choose another name`);
+    }
     const launchRoot = root, epoch = generation;
     if (active.has(name)) throw new Error(`Launch already in progress: ${name}`);
     active.add(name);
@@ -689,7 +712,7 @@ export default function adapter(pi, dependencies = {}) {
         throw new Error(`Unknown agent role "${params.agent}". Available: ${[...roles.keys()].join(', ') || 'none'}.`);
       }
       const options = applyRole(role, {
-        owner: ctx.sessionManager.getSessionId(), kind, name, task, cwd: resolve(ctx.cwd, params.cwd || role?.cwd || '.'),
+        owner: ctx.sessionManager.getSessionId(), kind, name, named: Boolean(params.named), task, cwd: resolve(ctx.cwd, params.cwd || role?.cwd || '.'),
         runtime: kind === 'shell' ? 'shell-runner' : 'direct-pi',
         rexSession: process.env.REX_SESSION, anchor: process.env.REX_BLOCK,
         piBin: process.env.PI_REX_PI_BIN || process.argv[1] || 'pi',
@@ -709,6 +732,7 @@ export default function adapter(pi, dependencies = {}) {
         requested = true;
         run.block = await client.open(run, runner, signal);
         run.status = 'running';
+        if (claims) claimed.set(claims, run.id);
       } catch (e) {
         // Creation can have succeeded even if its acknowledgement was lost.
         run.status = requested ? 'uncertain' : 'cancelled'; run.error = e.message;
@@ -814,7 +838,7 @@ export default function adapter(pi, dependencies = {}) {
     });
     await rm(join(dir, promoteFile), { force: true });
     promoteWaits.delete(run.id);
-    tracked.delete(run.id);
+    tracked.delete(run.id); releaseName(run.id);
     if (current?.hasUI) current.ui.notify(ui('detached', { name: label }), 'info');
   }
 
@@ -1052,13 +1076,13 @@ export default function adapter(pi, dependencies = {}) {
   // A launched call the extension has lost track of (after /reload) still has to
   // say something true: the label comes from the arguments, the state from nothing.
   const launchedNote = result => (result?.details?.id ? `Launched · ${result.details.id}` : 'Launched');
-  const argsAgent = (args, kind) => agentSnapshot({ label: args?.label || args?.title, role: kind === 'agent' ? args?.agent : undefined, state: 'launching' });
+  const argsAgent = (args, kind) => agentSnapshot({ label: args?.label || args?.title, name: args?.name, named: Boolean(args?.name), role: kind === 'agent' ? args?.agent : undefined, state: 'launching' });
   // Before the first scan lands there is no run to read, but the arguments
   // already say what was asked for: queued steps, an empty progress count.
   const argsPipeline = args => {
     const steps = Array.isArray(args?.steps) ? args.steps : [];
     return { title: args?.title, done: 0, total: steps.length,
-      agents: steps.map(step => agentSnapshot({ label: step?.label, role: step?.agent, state: 'queued' })) };
+      agents: steps.map(step => agentSnapshot({ label: step?.label, name: step?.name, named: Boolean(step?.name), role: step?.agent, state: 'queued' })) };
   };
 
   function agentRenderers() {
@@ -1126,12 +1150,23 @@ export default function adapter(pi, dependencies = {}) {
   const fields = { task: string, name: string, label: string, cwd: string, model: string, fork: { type: 'boolean' } };
   const agentFields = { ...fields, agent: string };
   const roleHint = roleSummary(discoverRoles(process.cwd()));
-  tool('subagent', `Launch a bounded task in a persistent interactive Pi terminal in a Rex tab. Optional agent picks a role, which supplies its own model, thinking, tools and instructions${roleHint ? `: ${roleHint}` : ''}. The label is required: six words or fewer naming the goal, because the parent list shows goals, not task text. Result arrives automatically; do not poll. Review the handoff, then promptly call rex_finish unless another agent turn is needed; retained files remain usable for integration and testing. Use separate checkouts for parallel writers.`, schema(agentFields, ['task', 'label']), (p, ctx, signal, id) => launch('agent', p, ctx, signal)
+  // A name is written by hand only where a model or a user writes it, so that is
+  // where the two-word rule is enforced. A name the adapter composes for a
+  // pipeline step is a description of the step and is passed through untouched.
+  const withName = params => {
+    const check = checkName(params?.name);
+    if (!check.ok) throw new Error(check.reason);
+    // An absent name is stamped rather than left out: named travels in the tool
+    // arguments, and a caller that wrote one by hand is not the caller we trust
+    // to have written the flag too.
+    return check.name ? { ...params, name: check.name, named: true } : { ...params, named: false };
+  };
+  tool('subagent', `Launch a bounded task in a persistent interactive Pi terminal in a Rex tab. Optional agent picks a role, which supplies its own model, thinking, tools and instructions${roleHint ? `: ${roleHint}` : ''}. The label is required: six words or fewer naming the goal, because the parent list shows goals, not task text. A name of one or two words labels the tab. thinking is not a parameter: the role supplies it. Result arrives automatically; do not poll. Review the handoff, then promptly call rex_finish unless another agent turn is needed; retained files remain usable for integration and testing. Use separate checkouts for parallel writers.`, schema(agentFields, ['task', 'label']), (p, ctx, signal, id) => launch('agent', withName(p), ctx, signal)
     .then(run => { rememberTool(id, { kind: 'agent', runId: run.id }); return run; }), agentRenderers());
   tool('pipeline', `Run an ordered chain of agent roles, one pane per step. Each step receives the overall task and the previous step's report; steps run sequentially and one combined report arrives when the chain ends (max ${MAX_STEPS} steps). Every step needs a label of six words or fewer naming that step's goal. Roles: ${roleHint || 'none'}. Do not poll.`, schema({ steps: { type: 'array', minItems: 1, maxItems: MAX_STEPS, items: { type: 'object', properties: { agent: string, task: string, label: string, model: string }, required: ['task', 'label'], additionalProperties: false } }, title: string, cwd: string, model: string, fork: { type: 'boolean' } }, ['steps']), (p, ctx, signal, id) => startPipeline(p, ctx, signal)
     .then(chain => { rememberTool(id, { kind: 'pipeline', chainId: chain.id }); return chain; }), pipelineRenderers());
-  tool('btw', 'Reuse the parent side conversation, or create it on the right. Supply task to queue a question; omit task to focus. Only /btw-return sends conclusions back.', schema(fields), (p, ctx, signal) => launch('btw', p, ctx, signal));
-  tool('bg_run', 'Run a long shell command in a background Rex block. Use for builds/tests/servers that should not block the main task. Completion reports exit code and output automatically; do not poll.', schema({ command: string, name: string, cwd: string }, ['command']), (p, ctx, signal) => launch('shell', { ...p, task: p.command }, ctx, signal));
+  tool('btw', 'Reuse the parent side conversation, or create it on the right. Supply task to queue a question; omit task to focus. Only /btw-return sends conclusions back.', schema(fields), (p, ctx, signal) => launch('btw', withName(p), ctx, signal));
+  tool('bg_run', 'Run a long shell command in a background Rex block. Use for builds/tests/servers that should not block the main task. Completion reports exit code and output automatically; do not poll.', schema({ command: string, name: string, cwd: string }, ['command']), (p, ctx, signal) => launch('shell', withName({ ...p, task: p.command }), ctx, signal));
   tool('rex_finish', 'Promptly close a completed agent/shell block after reviewing its handoff unless further interaction is needed. Files, results and session records remain available for parent integration/testing; do not wait for the overall parent task to end. Requires a completed task and an idle or exited process; rejects BTW and active/failed tasks.', schema({ id: string }, ['id']), (p, _ctx, signal) => control(p.id, 'finish', signal));
   tool('rex_tasks', 'Inspect owned tasks, or one task by optional id. Always returns an array. Completion is automatic; do not poll.', schema({ id: string }), status);
   tool('bg_logs', 'Read the last 16 KB of shell output for diagnosis. Returns logAvailable=false when no log exists; agent/BTW results are in rex_tasks. Do not poll for completion.', schema({ id: string }, ['id']), async p => logs(await owned(p.id)));

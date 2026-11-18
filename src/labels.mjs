@@ -39,6 +39,29 @@ export function requireLabel(value, where = '') {
   return check.label;
 }
 
+// A name is the handle a launch's tab carries, so it lives under the same rule as
+// a label: a tab title is a strip, not a sentence. Two words is the whole budget,
+// and a handle long enough to push the goal out of its column is not a handle.
+// An absent name is fine — a run without one gets a derived name instead — so the
+// check only ever rejects a name that was actually written.
+export const MAX_NAME_WORDS = 2;
+export const MAX_NAME_CHARS = 24;
+
+export function checkName(value) {
+  const raw = String(value ?? '');
+  if (!raw.trim()) return { ok: true, name: undefined };
+  if (/[\r\n\u0000-\u001f\u007f]/.test(raw)) return { ok: false, reason: 'name must be a single line of plain text' };
+  const text = raw.trim().replace(/\s+/g, ' ');
+  const count = labelWords(text).length;
+  if (count > MAX_NAME_WORDS) {
+    return { ok: false, reason: `name must be ${MAX_NAME_WORDS} words or fewer, got ${count}: "${text}"` };
+  }
+  if (text.length > MAX_NAME_CHARS) {
+    return { ok: false, reason: `name must be ${MAX_NAME_CHARS} characters or fewer, got ${text.length}: "${text}"` };
+  }
+  return { ok: true, name: text };
+}
+
 export function deriveLabel(task) {
   const first = String(task ?? '').split('\n').map(line => line.trim()).find(Boolean) || '';
   const text = first.replace(MARKER, '').replace(/\s+/g, ' ').trim();
