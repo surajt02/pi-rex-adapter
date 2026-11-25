@@ -1,22 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { dialogComponent, nativePickerComponent, createDialogs, wrapText, matchesChord } from '../src/dialog.mjs';
+import { panelComponent, nativePickerComponent, createDialogs, wrapText, matchesChord } from '../src/dialog.mjs';
 
 function component(config) {
   const results = [];
   const tui = { terminal: { rows: 16 }, requestRender() {} };
-  return { tui, results, component: dialogComponent({ tui, theme: {},
+  return { tui, results, component: panelComponent({ tui, theme: {},
     keys: { matches: (data, key) => data === key }, done: value => results.push(value), ...config }) };
 }
 
-test('floating menu scrolls, follows selection after resize, and returns stable task IDs', () => {
+test('inline menu scrolls, follows selection after resize, and returns stable task IDs', () => {
   const h = component({ title: 'Rex Tasks', choices: Array.from({ length: 40 }, (_, i) => ({ label: `Task ${i}`, value: `uuid-${i}` })) });
   h.component.render(50);
   for (let i = 0; i < 12; i++) h.component.handleInput('tui.select.down');
   h.tui.terminal.rows = 10;
   const lines = h.component.render(35);
-  assert.ok(lines.length <= 8);
-  assert.match(lines.join('\n'), /› Task 12/);
+  assert.ok(lines.length <= 10);
+  assert.match(lines.join('\n'), /→ Task 12/);
   h.component.handleInput('tui.select.confirm');
   assert.deepEqual(h.results, ['uuid-12']);
 });
@@ -46,46 +46,45 @@ test('viewer strips injected terminal commands and fits a narrow terminal', () =
   }
 });
 
-test('session shutdown dismisses active overlays and resolves their promises', async () => {
+test('session shutdown dismisses active panels and resolves their promises', async () => {
   const dialogs = createDialogs();
-  let overlay;
-  const ctx = { hasUI: true, ui: { custom: (factory, options) => new Promise(resolve => {
-    assert.equal(options.overlay, true); assert.equal(options.overlayOptions.anchor, 'center'); assert.equal(options.overlayOptions.width, 84);
-    overlay = factory({ terminal: { rows: 24 }, requestRender() {} }, {}, { matches() { return false; } }, resolve);
+  let panel;
+  const ctx = { hasUI: true, ui: { custom: (factory) => new Promise(resolve => {
+    panel = factory({ terminal: { rows: 24 }, requestRender() {} }, {}, { matches() { return false; } }, resolve);
   }) } };
   const pending = dialogs.view(ctx, 'Task details', 'body');
-  assert.match(overlay.render(60).join('\n'), /body/);
+  assert.match(panel.render(60).join('\n'), /body/);
   dialogs.closeAll();
   assert.equal(await pending, undefined);
   dialogs.closeAll();
 });
 
-test('empty task panel has a bounded opaque frame, padding and a separate selected row', () => {
-  const styles = [];
-  const theme = { style: (text, options) => { styles.push(options); return text; } };
+test('panels use the picker chrome and theme tokens, never an opaque box', () => {
+  const tokens = [];
+  const theme = { fg: (token, text) => { tokens.push(token); return text; } };
   const h = component({ title: 'Rex Tasks', theme, description: '暂无任务\n使用 /bg 或 /rex-agent 启动任务。',
     choices: [{ label: '隐藏主页面概览', value: 'toggle' }] });
   h.tui.terminal.rows = 30;
   const lines = h.component.render(84);
-  assert.match(lines[0], /^╭─+╮$/);
-  assert.match(lines.at(-1), /^╰─+╯$/);
-  assert.match(lines.join('\n'), /│  Rex Tasks/);
+  // A dim rule at each end, the title under it, and no side borders or fill.
+  assert.equal(lines[0], '─'.repeat(84));
+  assert.equal(lines.at(-1), '─'.repeat(84));
+  assert.equal(lines[1], ' Rex Tasks');
+  assert.ok(lines.every(line => !/[│╭╮╰╯]/.test(line)));
   assert.match(lines.join('\n'), /暂无任务/);
   assert.match(lines.join('\n'), /使用 \/bg 或 \/rex-agent/);
-  assert.ok(lines.slice(1, -1).every(line => line.startsWith('│') && line.endsWith('│')));
-  assert.ok(styles.every(style => style.bg?.kind === 'rgb'));
-  assert.ok(styles.some(style => style.bg.r === 40 && style.bg.g === 60 && style.bg.b === 79));
-  assert.ok(styles.some(style => style.bold));
+  for (const token of ['border', 'accent', 'muted', 'dim']) assert.ok(tokens.includes(token), token);
+  assert.equal(tokens.includes('background'), false);
 });
 
-test('large task lists remain scrollable inside the frame without overflowing the height budget', () => {
+test('large task lists remain scrollable without overflowing the terminal height', () => {
   const h = component({ title: 'Rex Tasks', description: '80 项任务',
     choices: Array.from({ length: 80 }, (_, i) => ({ label: `Task ${i}`, value: `${i}` })) });
   for (const rows of [10, 16, 30]) {
     h.tui.terminal.rows = rows;
     const lines = h.component.render(50);
-    assert.ok(lines.length <= Math.floor(rows * 0.8));
-    assert.match(lines.at(-1), /^╰/);
+    assert.ok(lines.length <= rows);
+    assert.match(lines.at(-1), /^─+$/);
   }
 });
 
@@ -104,7 +103,7 @@ test('reopening a menu restores selected ID and scroll offset after viewing deta
   assert.deepEqual(reopened.results, ['id-19']);
 });
 
-test('a dismissed dialog ignores queued confirmation, navigation and cancellation', () => {
+test('a dismissed panel ignores queued confirmation, navigation and cancellation', () => {
   for (const first of ['cancel', 'confirm']) {
     const state = {};
     const h = component({ title: 'Tasks', state, choices: [{ value: 'one', label: 'One' }, { value: 'two', label: 'Two' }] });
@@ -128,14 +127,15 @@ test('ctrl+n is recognised in the three terminal encodings and nothing else', ()
   for (const chord of [undefined, '', 'n', 'n+ctrl', 'ctrl+', 'shift+n']) assert.equal(matchesChord('\x0e', chord), false, String(chord));
 });
 
-test('hotkeys are ignored without choices and the hint line defaults to selectHint', () => {
+test('hotkeys are ignored without choices and the hint line follows Pi wording', () => {
   const viewer = component({ title: 'Logs', text: 'line one' });
   viewer.component.render(84);
   viewer.component.handleInput('\x0e');
   assert.deepEqual(viewer.results, []);
   const standard = component({ title: 'Tasks', choices: [{ value: 'one', label: 'One' }] });
-  // The overlay row is fitted, which collapses runs of spaces to one.
-  assert.match(standard.component.render(84).join('\n'), /↑↓ Select +Enter Confirm +Esc Back/);
+  assert.match(standard.component.render(84).join('\n'), /↑↓ to move · Enter to select · Esc to go back/);
+  const long = component({ title: 'Logs', text: Array.from({ length: 80 }, (_, i) => `line ${i}`).join('\n') });
+  assert.match(long.component.render(84).join('\n'), /1\/80/);
 });
 
 function nativePicker(config) {
@@ -211,16 +211,19 @@ test('a long picker list scrolls inside the terminal and reports its position', 
   assert.match(scrolled, /\(13\/40\)/);
 });
 
-test('dialogs.pick is inline and dialogs.select stays an overlay', async () => {
-  const calls = [];
+test('every dialog is inline: no overlay options are ever passed', async () => {
+  const calls = [], rendered = [];
   const ctx = { hasUI: true, ui: { custom: (factory, config) => {
     calls.push(config);
-    factory({ terminal: { rows: 24 }, requestRender() {} }, {}, { matches: () => false }, () => {});
+    const component = factory({ terminal: { rows: 24 }, requestRender() {} }, { fg: (_, text) => text },
+      { matches: () => false }, () => {});
+    rendered.push(component.render(70).join('\n'));
     return Promise.resolve(undefined);
   } } };
   const dialogs = createDialogs(() => 'en');
   await dialogs.pick(ctx, panes);
   await dialogs.select(ctx, 'Tasks', [{ value: 'a', label: 'A' }]);
-  assert.equal(calls[0], undefined);
-  assert.equal(calls[1].overlay, true);
+  await dialogs.view(ctx, 'Logs', 'body');
+  assert.deepEqual(calls, [undefined, undefined, undefined]);
+  for (const screen of rendered) assert.doesNotMatch(screen, /[│╭╮╰╯]/);
 });

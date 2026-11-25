@@ -66,6 +66,25 @@ export default function adapter(pi, dependencies = {}) {
   let rexPromise;
   let lifecycle, lifecycleStarting;
   const rex = () => dependencies.rex ? Promise.resolve(dependencies.rex) : (rexPromise ??= rexExecutable().then(binary => new Rex(binary)));
+  // Current Rex sets only REX_BLOCK when it opens a terminal. The session holding
+  // that pane is asked for once, here, so every launch targets the same session
+  // the environment used to name. REX_SESSION stays an override for a caller that
+  // sets it by hand; a failed ask is not cached, so the next launch retries.
+  let rexSessionPromise;
+  const rexSession = async signal => {
+    if (process.env.REX_SESSION) return process.env.REX_SESSION;
+    if (!rexSessionPromise) {
+      rexSessionPromise = rex().then(client => client.session(signal));
+      rexSessionPromise.catch(() => { rexSessionPromise = undefined; });
+    }
+    return rexSessionPromise;
+  };
+  // A launch with no session has nowhere to put its pane: say so in terms the
+  // caller can act on instead of letting the rex error surface as-is.
+  async function sessionForLaunch(signal) {
+    try { return await rexSession(signal); }
+    catch { throw new Error('Cannot read the Rex session holding this pane; check that `rex whoami` answers.'); }
+  }
   const seen = ctx => new Set(ctx.sessionManager.getEntries()
     .filter(e => e.type === 'custom_message' && e.customType === 'rex_result')
     .flatMap(e => e.details?.receipts || [e.details?.receipt]));
@@ -247,7 +266,7 @@ export default function adapter(pi, dependencies = {}) {
     controlsDirect = direct;
     for (const [name, definition] of toolDefinitions) {
       const directAlways = ['subagent', 'pipeline', 'btw', 'bg_run'].includes(name);
-      const directInRex = name === 'rex_finish' && process.env.REX_SESSION && process.env.REX_BLOCK;
+      const directInRex = name === 'rex_finish' && process.env.REX_BLOCK;
       if (directAlways || directInRex) continue;
       pi.registerTool({ ...definition, exposure: direct ? 'direct' : 'deferred' });
     }
@@ -562,7 +581,7 @@ export default function adapter(pi, dependencies = {}) {
     return { id: chain.id, status: chain.status, title,
       steps: chain.steps.map(step => ({ label: stepLabel(step, chain.steps.length), agent: step.agent, state: step.status })),
       first: first.id, artifacts: chainDirectory(chainRoot, chain.id),
-      note: 'Steps run in order, each in its own pane. One combined report arrives when the chain ends. Do not poll.' };
+      note: 'Steps run in order, each in its own pane. One combined report is delivered at your next turn boundary when the chain ends; do not poll, and do not sleep.' };
   }
   function boundary(event, ctx) {
     // Filesystem discovery and Rex cleanup run independently of model boundaries.
@@ -607,7 +626,28 @@ export default function adapter(pi, dependencies = {}) {
     current = undefined; pending.clear(); inbox.clear(); tracked.clear(); claimed.clear(); cleanup.clear(); cleanupErrors.clear();
     chainSeen.clear(); chainWork.clear(); chainMap = new Map(); transcriptRows.clear(); clearInterval(spinTimer); spinTimer = undefined;
   }
-  pi.on('session_shutdown', stop);
+  // A parent that quits leaves no one to close its children: a finished pane stays
+  // open, and its record is reachable only from that same parent session. Close the
+  // ones whose report was already delivered and whose Pi is idle. A running agent,
+  // an undelivered report, and every non-quit shutdown (reload, new, resume, fork)
+  // keep their panes, and one that refuses to close cannot hold up the exit.
+  async function closeFinishedAgents(ctx) {
+    if (!config.closeFinishedAgentsOnExit || !ctx || !root) return;
+    const delivered = seen(ctx);
+    for (const run of await listRuns(root)) {
+      try {
+        if (run.closed || run.kind !== 'agent' || !delivered.has(`${run.id}/result.json`)) continue;
+        const [result, activity] = await Promise.all([
+          readJson(join(run.dir, 'result.json')), readJson(join(run.dir, 'activity.json'))]);
+        if (result?.status !== 'completed' || activity?.process !== 'idle') continue;
+        await control(run.id, 'finish');
+      } catch { /* the exit must not wait on a pane it cannot close */ }
+    }
+  }
+  pi.on('session_shutdown', async event => {
+    if (event?.reason === 'quit') await closeFinishedAgents(current);
+    stop();
+  });
   pi.on('session_start', async (_event, ctx) => {
     stop(); current = ctx; suppressWake = false;
     const epoch = generation;
@@ -630,9 +670,13 @@ export default function adapter(pi, dependencies = {}) {
   // lock, because a modal must never be held open under it. Tool launches,
   // headless sessions and a session with no panes keep the automatic reuse.
   async function chooseBtw(task, ctx) {
-    if (!ctx?.hasUI || !root || !process.env.REX_SESSION) return undefined;
+    if (!ctx?.hasUI || !root || !process.env.REX_BLOCK) return undefined;
     const epoch = generation, signal = lifetime.signal;
-    const panes = await btwPanes(root, await rex(), { rexSession: process.env.REX_SESSION, signal });
+    // The picker is a convenience: when the session cannot be read there is no
+    // list to pick from, so the launch below reports the failure instead.
+    let session;
+    try { session = await rexSession(signal); } catch { return undefined; }
+    const panes = await btwPanes(root, await rex(), { rexSession: session, signal });
     signal.throwIfAborted();
     if (epoch !== generation || !panes.length) return undefined;
     const selection = await dialogs.pick(ctx, [
@@ -662,7 +706,8 @@ export default function adapter(pi, dependencies = {}) {
   }
   async function launchUnlocked(kind, params, ctx, signal) {
     if (!root || ctx.sessionManager.getSessionId() !== current?.sessionManager.getSessionId()) throw new Error('Session is not ready');
-    if (!process.env.REX_SESSION || !process.env.REX_BLOCK) throw new Error('Start Pi inside Rex (REX_SESSION and REX_BLOCK are required).');
+    if (!process.env.REX_BLOCK) throw new Error('Start Pi inside Rex (REX_BLOCK is required).');
+    const rexSessionId = await sessionForLaunch(signal);
     const task = params.task?.trim();
     // Only a user's own /btw question carries prompt snippets; a tool launch or
     // a delegated task is the parent agent's text, not the user's message.
@@ -694,7 +739,7 @@ export default function adapter(pi, dependencies = {}) {
       const client = await rex();
       if (kind === 'btw') {
         const reuse = { task, message, signal,
-          rexSession: process.env.REX_SESSION, model: params.model,
+          rexSession: rexSessionId, model: params.model,
           cwd: params.cwd ? resolve(ctx.cwd, params.cwd) : undefined };
         // A picked pane is reused directly; a picked New skips reuse entirely;
         // no choice at all is the tool path, which still reuses automatically.
@@ -714,7 +759,7 @@ export default function adapter(pi, dependencies = {}) {
       const options = applyRole(role, {
         owner: ctx.sessionManager.getSessionId(), kind, name, named: Boolean(params.named), task, cwd: resolve(ctx.cwd, params.cwd || role?.cwd || '.'),
         runtime: kind === 'shell' ? 'shell-runner' : 'direct-pi',
-        rexSession: process.env.REX_SESSION, anchor: process.env.REX_BLOCK,
+        rexSession: rexSessionId, anchor: process.env.REX_BLOCK,
         piBin: process.env.PI_REX_PI_BIN || process.argv[1] || 'pi',
         path: process.env.PATH,
         label: label.ok ? label.label : undefined,
@@ -752,14 +797,44 @@ export default function adapter(pi, dependencies = {}) {
       }
       if (epoch === generation) { tracked.set(run.id, run.dir); monitor(); void reconcile(); }
       return { id: run.id, block: run.block, window: run.window, status: run.status, error: run.error, artifacts: run.dir,
-        note: run.status === 'uncertain' ? 'Inspect Rex before retrying; a process may already be running.' : 'Completion will be delivered automatically. Do not poll.' };
+        note: run.status === 'uncertain' ? 'Inspect Rex before retrying; a process may already be running.'
+          : 'Completion is delivered at your next turn boundary: after this tool call returns, or as soon as you end the turn. Do not poll, and do not sleep — a sleeping bash call holds the boundary and delays the report by its own duration.' };
     } finally { active.delete(name); }
   }
+  // A caller retyping a 36-character id can drop or change one character, and the
+  // old answer — "Unknown task ID in this parent session" — read as "not mine",
+  // which ended the attempt and left the finished pane open. Accept an unambiguous
+  // prefix, and on a miss name the closest owned task so the caller can retry
+  // instead of abandoning the pane.
+  const idShape = /^[0-9a-f][0-9a-f-]{7,35}$/;
+  function distance(a, b) {
+    let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+    for (let i = 1; i <= a.length; i++) {
+      const current = [i];
+      for (let j = 1; j <= b.length; j++) {
+        current[j] = Math.min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      }
+      previous = current;
+    }
+    return previous[b.length];
+  }
   async function owned(id, runRoot = root) {
-    if (!/^[0-9a-f-]{36}$/.test(id.trim())) throw new Error('Unknown task ID in this parent session');
-    const run = await readJson(join(runRoot, id.trim(), 'run.json'));
-    if (!run || run.id !== id.trim() || run.dir !== join(runRoot, id.trim())) throw new Error('Unknown task ID in this parent session');
-    return run;
+    const query = String(id ?? '').trim().toLowerCase();
+    if (!idShape.test(query)) throw new Error(`Not a task ID: ${JSON.stringify(String(id ?? ''))}. Use the id from a launch result or a report, such as "0a816a0e-b73e-472c-a8e9-93c9e37b363f".`);
+    const runs = await listRuns(runRoot);
+    const exact = runs.find(run => run.id === query);
+    if (exact) return exact;
+    const starting = runs.filter(run => run.id.startsWith(query));
+    if (starting.length === 1) return starting[0];
+    if (starting.length > 1) {
+      throw new Error(`Ambiguous task ID ${query}: ${starting.length} owned tasks start with it (${starting.slice(0, 3).map(run => run.id).join(', ')}${starting.length > 3 ? ', …' : ''}). Type more characters.`);
+    }
+    const nearest = runs.map(run => ({ run, at: distance(query, run.id) }))
+      .filter(({ at }) => at <= 2).sort((a, b) => a.at - b.at)[0];
+    if (nearest) {
+      throw new Error(`No task ${query} in this parent session. Closest owned id: ${nearest.run.id} (${nearest.at} character${nearest.at === 1 ? ' differs' : 's differ'}). Retry with that id.`);
+    }
+    throw new Error(`No task ${query} in this parent session. rex_tasks lists the ids this session owns; a task launched by another session can only be closed from that session.`);
   }
   async function taskStates(run) {
     const [exit, result, activity] = await Promise.all(['exit', 'result', 'activity']
@@ -984,7 +1059,7 @@ export default function adapter(pi, dependencies = {}) {
     });
   }
   pi.registerCommand('rex-tasks', {
-    description: 'Open the Rex task manager overlay: history, details, logs, actions and overview settings',
+    description: 'Open the Rex task manager panel: history, details, logs, actions and overview settings',
     handler: async (_args, ctx) => {
       if (!ctx.hasUI || taskPanel) return;
       const panel = {}; taskPanel = panel;
@@ -1042,12 +1117,14 @@ export default function adapter(pi, dependencies = {}) {
                 if (action !== 'interrupt') break;
               }
             } catch (error) {
-              if (epoch === generation) await dialogs.view(ctx, ui('actionError'), error.message);
+              // A failed action is reported on the status line: a panel that has
+              // to be dismissed before the task list is readable is a popup.
+              if (epoch === generation) ctx.ui.notify(`${ui('actionError')}: ${error.message}`, 'error');
             }
           }
         }
       } catch (error) {
-        if (epoch === generation) await dialogs.view(ctx, ui('actionError'), error.message);
+        if (epoch === generation) ctx.ui.notify(`${ui('actionError')}: ${error.message}`, 'error');
       } finally {
         if (taskPanel === panel) taskPanel = undefined;
       }
@@ -1061,9 +1138,10 @@ export default function adapter(pi, dependencies = {}) {
         if (epoch !== generation) return;
         // Esc in a picker is a cancel, not a failed launch: say nothing at all.
         if (result?.status === 'dismissed') return;
-        if (result.status === 'uncertain') await dialogs.view(ctx, ui('launchUncertain'), `${result.error}\n\n${ui('checkRex')}`);
-        else actionStatus(ctx, result.reused ? ui('reused') : ui('started'));
-      } catch (error) { if (epoch === generation) await dialogs.view(ctx, ui('actionError'), error.message); }
+        if (result.status === 'uncertain') {
+          ctx.ui.notify(`${ui('launchUncertain')} — ${result.error} ${ui('checkRex')}`, 'error');
+        } else actionStatus(ctx, result.reused ? ui('reused') : ui('started'));
+      } catch (error) { if (epoch === generation) ctx.ui.notify(`${ui('actionError')}: ${error.message}`, 'error'); }
     } });
   }
   const paintWith = theme => (token, text) => {
@@ -1130,7 +1208,7 @@ export default function adapter(pi, dependencies = {}) {
   }
 
   function tool(name, description, parameters, handler, render) {
-    const direct = Boolean(process.env.REX_SESSION && process.env.REX_BLOCK) && ['subagent', 'pipeline', 'btw', 'bg_run', 'rex_finish'].includes(name);
+    const direct = Boolean(process.env.REX_BLOCK) && ['subagent', 'pipeline', 'btw', 'bg_run', 'rex_finish'].includes(name);
     const definition = { name, label: name, description, parameters, exposure: direct ? 'direct' : 'deferred',
       ...(render || {}),
       async execute(id, params, signal, _update, ctx) {

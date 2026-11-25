@@ -37,8 +37,9 @@ async function until(predicate) {
   assert.fail('Timed out');
 }
 function driveOverlays(ctx, scripts) {
+  // Inline panels only: no overlay options, exactly as the extension opens them.
   ctx.ui.custom = async (factory, options) => {
-    assert.equal(options.overlay, true);
+    assert.equal(options, undefined);
     let result;
     const component = factory({ terminal: { rows: 24 }, requestRender() {} }, {},
       { matches: (data, key) => data === key }, value => { result = value; });
@@ -377,7 +378,7 @@ test('theme paints the chain marker slate blue, roles muted and stats dim, with 
   assert.ok(tokens.includes('success')); assert.ok(!tokens.includes('warning'));
 });
 
-test('task list and details stay in overlays, with no notification or transcript dump', async t => {
+test('task list and details stay in inline panels, with no notification or transcript dump', async t => {
   const h = await fixture(t); await task(h.root, 'agent');
   await h.events.session_start({}, h.ctx); await h.boundary();
   let notices = 0;

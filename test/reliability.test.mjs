@@ -239,10 +239,12 @@ test('details and operation errors return to the selected task menu and list pos
   const screens = [];
   overlays(h, [['down', 'confirm'], ['confirm'], ['cancel'], ['down', 'confirm'], ['cancel'], ['cancel'], ['cancel']], screens);
   await h.commands['rex-tasks'].handler('', h.ctx);
-  assert.match(screens[3], /› View task and result/);
-  assert.match(screens[4], /offline/);
-  assert.match(screens[5], /› Focus task/);
-  assert.match(screens[6], /› \[Agent\] review/);
+  assert.match(screens[3], /→ View task and result/);
+  // A failed action is a status-line error, not a screen to dismiss; the menu it
+  // came from is still the one on screen.
+  assert.ok(h.updates.some(([message, level]) => level === 'error' && /offline/.test(message)));
+  assert.match(screens[4], /→ Focus task/);
+  assert.match(screens[5], /→ \[Agent\] review/);
 });
 
 test('close reports and persists the derived outcome, including repeat closes of older records', async t => {
@@ -500,4 +502,44 @@ test('the first paint names the launch, and only a name that was written counts'
   const started = await h.call('subagent', { ...unnamed, named: true });
   const record = JSON.parse(await readFile(join(h.root, started.details.id, 'run.json'), 'utf8'));
   assert.equal(record.named, false);
+});
+
+test('a shortened task id resolves, and a mistyped one names the closest owned task', async t => {
+  inRex(t); const h = await fixture(t);
+  const run = await prepareRun(h.root, { kind: 'agent', name: 'review', task: 'review' }, '');
+  await atomicJson(join(run.dir, 'result.json'), { status: 'completed', text: 'ok' });
+  await atomicJson(join(run.dir, 'activity.json'), { process: 'idle' });
+  await h.events.session_start({}, h.ctx);
+  // A retyped id that drops or changes a character used to answer "unknown", which
+  // read as "not mine" and left the finished pane open. A unique prefix now works.
+  assert.equal((await h.call('rex_tasks', { id: run.id.slice(0, 8) })).details[0].id, run.id);
+  const typo = run.id.slice(0, -1) + (run.id.endsWith('a') ? 'b' : 'a');
+  const missed = await h.call('rex_tasks', { id: typo });
+  assert.equal(missed.isError, true);
+  assert.match(missed.details.error, new RegExp(`Closest owned id: ${run.id}`));
+  assert.match(missed.details.error, /1 character differs/);
+  const wrong = await h.call('rex_tasks', { id: 'review' });
+  assert.equal(wrong.isError, true);
+  assert.match(wrong.details.error, /Not a task ID/);
+});
+
+test('quitting closes a delivered idle agent, and reload keeps it', async t => {
+  for (const [reason, expected] of [['reload', 0], ['quit', 1]]) {
+    inRex(t);
+    const closed = [];
+    const h = await fixture(t, { control: async (run, action) => { closed.push(`${run.id}:${action}`); } });
+    const done = await prepareRun(h.root, { kind: 'agent', name: 'done', task: 'done', block: 'block-done' }, '');
+    await atomicJson(join(done.dir, 'run.json'), { ...done, block: 'block-done' });
+    await atomicJson(join(done.dir, 'result.json'), { status: 'completed', text: 'done' });
+    await atomicJson(join(done.dir, 'activity.json'), { process: 'idle' });
+    const busy = await prepareRun(h.root, { kind: 'agent', name: 'busy', task: 'busy', block: 'block-busy' }, '');
+    await atomicJson(join(busy.dir, 'run.json'), { ...busy, block: 'block-busy' });
+    await atomicJson(join(busy.dir, 'activity.json'), { process: 'running' });
+    h.entries.push({ type: 'custom_message', customType: 'rex_result', details: { receipts: [`${done.id}/result.json`] } });
+    await h.events.session_start({}, h.ctx);
+    await h.events.session_shutdown({ type: 'session_shutdown', reason });
+    assert.deepEqual(closed, expected ? [`${done.id}:close`] : []);
+    assert.equal(Boolean((await readJson(join(done.dir, 'run.json'))).closed), Boolean(expected));
+    assert.notEqual((await readJson(join(busy.dir, 'run.json'))).closed, true, 'a running agent keeps its pane');
+  }
 });

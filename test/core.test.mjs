@@ -13,6 +13,30 @@ async function temporary(t) {
   const root = await mkdtemp(join(tmpdir(), 'pi-rex-test-'));
   t.after(() => rm(root, { recursive: true, force: true })); return root;
 }
+test('a session is asked for once, remembered, and asked again after a failure', async () => {
+  // Current Rex sets only REX_BLOCK in a terminal: the session holding the pane
+  // comes from the server, and asking once is enough for every later launch.
+  const calls = [];
+  let answer = false;
+  const rex = new Rex('rex', async (_file, argv) => {
+    calls.push(argv);
+    if (!answer) throw new Error('rex: connect: no such file or directory');
+    return '{"session_id":"session:parent"}';
+  });
+  await assert.rejects(() => rex.session(), /no such file/);
+  answer = true;
+  assert.equal(await rex.session(), 'session:parent');
+  assert.equal(await rex.session(), 'session:parent');
+  assert.deepEqual(calls[0], ['whoami', '--json']);
+  assert.equal(calls.length, 2, 'a failed ask is retried, a good one is not repeated');
+});
+test('a session ask that names no session is an error, not an empty session', async () => {
+  const rex = new Rex('rex', async () => '{"principal":{}}');
+  await assert.rejects(() => rex.session(), /did not report the session/);
+  // Not remembered, so a later ask can still succeed.
+  rex.run = async () => '{"session_id":"session:parent"}';
+  assert.equal(await rex.session(), 'session:parent');
+});
 test('BTW placement anchors on the parent, preserves focus, and keeps arguments literal', async () => {
   let args;
   const rex = new Rex('rex', async (_file, argv) => { args = argv; return '{"block_ids":["new","parent"]}'; });
@@ -394,7 +418,7 @@ test('control rejects arbitrary IDs without contacting Rex', async t => {
   const dir = await temporary(t), h = harness(dir); t.after(() => h.events.session_shutdown());
   await h.events.session_start({}, h.ctx);
   const result = await h.tools.rex_control.execute('call', { id: '../someone-else', action: 'close' }, undefined, undefined, h.ctx);
-  assert.equal(result.isError, true); assert.match(result.details.error, /Unknown task/);
+  assert.equal(result.isError, true); assert.match(result.details.error, /Not a task ID/);
 });
 test('switching sessions does not deliver an old session result into the new session', async t => {
   const dir = await temporary(t), h = harness(dir); t.after(() => h.events.session_shutdown());

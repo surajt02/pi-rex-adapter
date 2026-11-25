@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { loadConfig, DEFAULT_CONFIG } from '../src/config.mjs';
+import { loadConfig, formatConfigReport, isDryRun, DEFAULT_CONFIG } from '../src/config.mjs';
 import { overviewLines, rowLabel } from '../src/overview.mjs';
-import { dialogComponent } from '../src/dialog.mjs';
+import { panelComponent } from '../src/dialog.mjs';
 import { prepareRun, atomicJson } from '../src/core.mjs';
 import { registerChild } from '../src/child.mjs';
 import adapter from '../src/index.mjs';
@@ -38,7 +38,7 @@ test('project overrides only its fields and respects a custom Pi agent directory
   await mkdir(global); await writeFile(join(global, 'rex.json'), JSON.stringify({ language: 'zh' }));
   await settings(dir, {});
   const loaded = await loadConfig(dir, { env: { PI_CODING_AGENT_DIR: '~/custom-agent' }, home: dir });
-  assert.deepEqual(loaded, { config: { language: 'zh' }, errors: [] });
+  assert.deepEqual(loaded, { config: { language: 'zh', closeFinishedAgentsOnExit: true }, errors: [] });
 });
 
 test('bad fields retain valid inherited values and malformed JSON is reported without crashing', async t => {
@@ -50,7 +50,7 @@ test('bad fields retain valid inherited values and malformed JSON is reported wi
   for (const panesPerTab of [0, -1, 1.5, '3', null, 2]) {
     await settings(dir, { language: 'xx', panesPerTab, extra: true });
     const loaded = await loadConfig(dir, { env: {}, home: dir });
-    assert.deepEqual(loaded.config, { language: 'zh' });
+    assert.deepEqual(loaded.config, { language: 'zh', closeFinishedAgentsOnExit: true });
     assert.equal(loaded.errors.length, 3);
     assert.ok(loaded.errors.every(error => error.includes(join(dir, '.pi', 'rex.json'))));
     assert.ok(loaded.errors.some(error => error.includes('panesPerTab')));
@@ -59,8 +59,95 @@ test('bad fields retain valid inherited values and malformed JSON is reported wi
     await writeFile(join(dir, '.pi', 'rex.json'), content);
     const loaded = await loadConfig(dir, { env: {}, home: dir });
     assert.equal(loaded.errors.length, 1);
-    assert.deepEqual(loaded.config, { language: 'zh' });
+    assert.deepEqual(loaded.config, { language: 'zh', closeFinishedAgentsOnExit: true });
   }
+});
+
+test('a finished agent closes on quit unless closeFinishedAgentsOnExit is turned off', async t => {
+  const dir = await temp(t);
+  await settings(dir, { closeFinishedAgentsOnExit: false });
+  assert.deepEqual((await loadConfig(dir, { env: {}, home: dir })).config,
+    { language: 'en', closeFinishedAgentsOnExit: false });
+  await settings(dir, { closeFinishedAgentsOnExit: 'yes' });
+  const invalid = await loadConfig(dir, { env: {}, home: dir });
+  assert.equal(invalid.config.closeFinishedAgentsOnExit, true, 'an invalid value falls back to the default');
+  assert.match(invalid.errors[0], /closeFinishedAgentsOnExit must be true or false/);
+});
+
+test('--dry-run is off unless the flag is on the loader argv', async t => {
+  const dir = await temp(t);
+  assert.equal(isDryRun(['node', 'pi']), false);
+  assert.equal(isDryRun(['node', 'pi', '--model', 'x']), false);
+  assert.equal(isDryRun(['node', 'pi', '--dry-run']), true);
+  // Everything after a bare `--` is a positional prompt, not a flag.
+  assert.equal(isDryRun(['node', 'pi', '--', '--dry-run']), false);
+  assert.equal(isDryRun(['node', 'pi', '--', 'explain --dry-run']), false);
+  // Without the flag the result keeps its two-field shape, so callers that apply
+  // config never have to know the report exists.
+  assert.deepEqual(await loadConfig(dir, { env: {}, home: dir, argv: ['node', 'pi'] }),
+    { config: DEFAULT_CONFIG, errors: [] });
+});
+
+test('a dry run reports each value and which file produced it, applying nothing', async t => {
+  const dir = await temp(t), global = join(dir, '.pi', 'agent');
+  await mkdir(global, { recursive: true });
+  await writeFile(join(global, 'rex.json'), JSON.stringify({ language: 'zh' }));
+  await settings(dir, { closeFinishedAgentsOnExit: false });
+  const argv = ['node', 'pi', '--dry-run'];
+  const dry = await loadConfig(dir, { env: {}, home: dir, argv });
+  assert.equal(dry.dryRun, true);
+  assert.deepEqual(dry.config, { language: 'zh', closeFinishedAgentsOnExit: false });
+  assert.deepEqual(dry.errors, []);
+  assert.equal(dry.sources.language, join(global, 'rex.json'), 'the global file set the language');
+  assert.equal(dry.sources.closeFinishedAgentsOnExit, join(dir, '.pi', 'rex.json'), 'the project file overrode the default');
+  assert.deepEqual(dry.files, [
+    { path: join(global, 'rex.json'), read: true },
+    { path: join(dir, '.pi', 'rex.json'), read: true }]);
+  // The same inputs, read without the flag, resolve to the same values: a dry
+  // run explains a resolution rather than performing a different one.
+  const applied = await loadConfig(dir, { env: {}, home: dir, argv: ['node', 'pi'] });
+  assert.deepEqual(applied, { config: dry.config, errors: [] });
+});
+
+test('a dry run marks unconfigured values as defaults and unread files as missing', async t => {
+  const dir = await temp(t);
+  const dry = await loadConfig(dir, { env: {}, home: dir, argv: ['node', 'pi', '--dry-run'] });
+  assert.deepEqual(dry.config, DEFAULT_CONFIG);
+  assert.deepEqual(dry.sources, { language: 'default', closeFinishedAgentsOnExit: 'default' });
+  assert.ok(dry.files.every(file => !file.read), 'nothing was there to read');
+  const report = formatConfigReport(dry);
+  assert.match(report, /dry run/);
+  assert.match(report, /language = "en"  \(default\)/);
+  assert.match(report, new RegExp(`missing: ${join(dir, '.pi', 'rex.json').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.doesNotMatch(report, /problem/, 'no errors are invented by the report');
+});
+
+test('a dry run keeps reporting invalid settings while the file still wins nothing', async t => {
+  const dir = await temp(t), global = join(dir, '.pi', 'agent');
+  await mkdir(global, { recursive: true });
+  await writeFile(join(global, 'rex.json'), JSON.stringify({ language: 'zh' }));
+  await settings(dir, { language: 'xx', extra: true });
+  const dry = await loadConfig(dir, { env: {}, home: dir, argv: ['node', 'pi', '--dry-run'] });
+  assert.deepEqual(dry.config, { language: 'zh', closeFinishedAgentsOnExit: true });
+  assert.equal(dry.sources.language, join(global, 'rex.json'), 'a rejected value never becomes the source');
+  assert.equal(dry.sources.closeFinishedAgentsOnExit, 'default');
+  assert.equal(dry.errors.length, 2);
+  const report = formatConfigReport(dry);
+  assert.match(report, /2 problems:/);
+  assert.match(report, /Unknown setting: extra/);
+  assert.match(report, /read: .*rex\.json/);
+});
+
+test('a malformed file still appears in the dry-run report and the format refuses a normal result', async t => {
+  const dir = await temp(t);
+  await settings(dir, {});
+  await writeFile(join(dir, '.pi', 'rex.json'), '{');
+  const dry = await loadConfig(dir, { env: {}, home: dir, argv: ['node', 'pi', '--dry-run'] });
+  assert.equal(dry.files.at(-1).read, true, 'the file was read, it just did not parse');
+  assert.equal(dry.errors.length, 1);
+  assert.match(formatConfigReport(dry), /1 problem:/);
+  const applied = await loadConfig(dir, { env: {}, home: dir, argv: ['node', 'pi'] });
+  assert.throws(() => formatConfigReport(applied), /needs a dry-run result/);
 });
 
 function harness(dir, t) {
@@ -139,7 +226,7 @@ test('main-agent overview, footer and task manager switch language on reload; En
     };
     await h.commands['rex-tasks'].handler('', h.ctx);
     assert.match(screen, language === 'en' ? /Hide main-page overview/ : /隐藏主页面概览/);
-    assert.match(screen, language === 'en' ? /Esc Back/ : /Esc 返回/);
+    assert.match(screen, language === 'en' ? /Esc to go back/ : /Esc 返回/);
     if (language === 'en') assert.doesNotMatch(screen + widget, /\p{Script=Han}/u);
   }
 });
@@ -159,8 +246,8 @@ test('all visible states translate; language never rewrites task text or machine
   // State is a glyph and a colour, never a translated word in the parent list.
   assert.doesNotMatch(rendered, /Running|运行中|Completed|已完成/);
   for (const language of ['en', 'zh']) {
-    const viewer = dialogComponent({ tui: { terminal: { rows: 24 } }, theme: {}, keys: {}, done() {}, title: 'Logs', text: 'output', language });
-    assert.match(viewer.render(84).join('\n'), language === 'en' ? /Scroll.*Esc Back/ : /滚动.*Esc 返回/);
+    const viewer = panelComponent({ tui: { terminal: { rows: 24 } }, theme: {}, keys: {}, done() {}, title: 'Logs', text: 'output', language });
+    assert.match(viewer.render(84).join('\n'), language === 'en' ? /to scroll · Esc to go back/ : /滚动 · Esc 返回/);
   }
 });
 

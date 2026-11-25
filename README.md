@@ -9,9 +9,9 @@ Send a code review to another Pi agent. Explore a side question beside your main
 - **Full Pi subagents.** Delegate work to interactive Pi sessions in dedicated tabs. Get results automatically, then step into a session whenever you want to continue the conversation.
 - **A conversation on the side.** `/btw` opens an independent Pi beside your main chat. Only the conclusions you choose to return enter the main conversation.
 - **Background jobs that report back.** `/bg` runs long shell commands, delivers their exit code and output, and closes the pane after delivery.
-- **A compact view of active work.** One line per agent: its goal in a few words, elapsed time, and token count. Pipelines group their steps under one heading. History, logs, and controls stay available in a single overlay.
+- **A compact view of active work.** One line per agent: its goal in a few words, elapsed time, and token count. Pipelines group their steps under one heading. History, logs, and controls stay available in one inline panel.
 
-Built to stay out of the way: native Pi tools remain available, user-adjusted layouts are respected, and monitoring stops when no tasks need it. Configuration is just two settings: UI language and panes per tab.
+Built to stay out of the way: native Pi tools remain available, user-adjusted layouts are respected, and monitoring stops when no tasks need it. Configuration is two settings: UI language, and whether finished agents close when the parent quits.
 
 ## Installation
 
@@ -36,7 +36,7 @@ Or try it for one session:
 pi -e git:github.com/xiangsam/pi-rex-adapter
 ```
 
-The parent Pi must run inside Rex. The adapter uses `REX_SESSION` and `REX_BLOCK` to target the parent block, regardless of which pane currently has focus. If `rex` is not on `PATH`, it checks the standard macOS Rex and Rex Beta application locations; `PI_REX_BIN` can specify the executable. Child sessions use the current Pi entry point unless `PI_REX_PI_BIN` is set.
+The parent Pi must run inside Rex. The adapter uses `REX_BLOCK` to target the parent block, regardless of which pane currently has focus; the session holding that pane comes from `rex whoami`, or from `REX_SESSION` when something sets it by hand. If `rex` is not on `PATH`, it checks the standard macOS Rex and Rex Beta application locations; `PI_REX_BIN` can specify the executable. Child sessions use the current Pi entry point unless `PI_REX_PI_BIN` is set.
 
 Parent and child processes must share the same machine and filesystem. Remote Rex hosts are not supported.
 
@@ -56,7 +56,7 @@ Parent and child processes must share the same machine and filesystem. Remote Re
 | `/promote [note]` | Inside a side conversation: hands it to its own full Pi session |
 | `/rex-agent <task>` | Starts an interactive Pi subagent in an Agents tab |
 | `/bg <command>` | Starts a background shell job as a minimized chip |
-| `/rex-tasks` | Opens the task manager overlay |
+| `/rex-tasks` | Opens the task manager panel |
 
 The main agent can also launch and manage tasks through structured tools. Completion arrives automatically; it does not need to poll for results.
 
@@ -77,7 +77,8 @@ The setting is optional:
 
 | Setting | Default | Behavior |
 | --- | --- | --- |
-| `language` | `"en"` | `"en"` or `"zh"`. Covers the **main agent's overview**, including titles, task states and counts, plus overlays, action feedback and child-session notices. |
+| `language` | `"en"` | `"en"` or `"zh"`. Covers the **main agent's overview**, including titles, task states and counts, plus panels, action feedback and child-session notices. |
+| `closeFinishedAgentsOnExit` | `true` | On **quit**, close agent panes whose report was already delivered and whose Pi is idle. A running agent, an undelivered report, and reload, new, resume or fork keep their panes; a pane that cannot be closed does not hold up the exit. Set `false` to always leave finished agents open. |
 
 For example, `{"language":"zh"}` in the project file changes the UI language, and `{}` leaves it at the default. The former `panesPerTab` setting is gone: agents grew into one grid tab and background jobs became chips, so nothing is paged any more and the key is now reported as unknown.
 
@@ -95,7 +96,7 @@ New side sessions are named `BTW · <name>` and show their original topic in one
 
 The conversation has its own Pi session. By default it inherits the parent's model, thinking level, and a text snapshot of the current branch: up to 48,000 recent characters, including summaries but excluding images, thinking, and tool output. This is a text snapshot, not a complete Pi session clone.
 
-With a side conversation already open, `/btw <question>` first asks where the question goes. The picker takes over the editor area and is styled like Pi's own model picker rather than the task-manager overlay: theme border rules, a **Side Conversations** title in the accent colour, a `→` cursor, muted state and age, and a `Selected:` line naming the highlighted conversation; it lists every open side conversation of this session, newest first, each as `<name> · <state> · <age>`, followed by **＋ New side conversation**. Choosing a pane queues the question into that conversation and keeps its history; choosing New splits another pane to the right, exactly as the first one was opened. `ctrl+n` picks New from inside this picker only: it is not a registered shortcut, and Pi's own session-picker bindings are untouched. `Esc` dismisses the picker without launching anything. Bare `/btw` shows the same list without the New row and focuses the pane you choose, because there is no question to send to a new one.
+With a side conversation already open, `/btw <question>` first asks where the question goes. The picker takes over the editor area and is styled like Pi's own model picker: theme border rules, a **Side Conversations** title in the accent colour, a `→` cursor, muted state and age, and a `Selected:` line naming the highlighted conversation; it lists every open side conversation of this session, newest first, each as `<name> · <state> · <age>`, followed by **＋ New side conversation**. Choosing a pane queues the question into that conversation and keeps its history; choosing New splits another pane to the right, exactly as the first one was opened. `ctrl+n` picks New from inside this picker only: it is not a registered shortcut, and Pi's own session-picker bindings are untouched. `Esc` dismisses the picker without launching anything. Bare `/btw` shows the same list without the New row and focuses the pane you choose, because there is no question to send to a new one.
 
 With no side conversation open there is no picker: `/btw <question>` opens the first pane directly, and bare `/btw` still reports that a question is required. The `btw` tool keeps its automatic behaviour instead: a question launched by the main agent goes to the most recent open side conversation, since that is not the user choosing a pane.
 
@@ -227,17 +228,17 @@ A pipeline is one block under its ◆ heading, with `done/total` steps and a ste
 
 Terminal width is respected: goals are truncated only when they genuinely cannot fit, and the figures keep their columns. Terminal control characters are stripped. At most ten rows appear; the task manager holds the rest.
 
-`/rex-tasks` is the single management entry point. It opens a native Pi overlay, up to 84 columns wide, with an opaque blue-grey background, border, padding, and a highlighted selection. Closing it restores the underlying page.
+`/rex-tasks` is the single management entry point. It opens inline, like Pi's own pickers: the panel takes over the editor area, draws a `─` rule at each end, paints its title and `→` cursor with the active theme's tokens, and uses muted detail and a dim hint line. There is no overlay, no opaque background, and no box, so nothing floats over the transcript and the panel follows whatever theme is loaded. Closing it restores the editor, exactly as Pi's own pickers do.
 
-- Use arrow keys and Enter to select; Esc goes back one level (details/error → task menu → task list → close). Lists, details, and logs support PageUp/PageDown. Repeated `/rex-tasks` invocations do not stack task managers.
+- Use arrow keys and Enter to select; Esc goes back one level (details → task menu → task list → close). Lists, details, and logs support PageUp/PageDown. Repeated `/rex-tasks` invocations do not stack task managers.
 - Task menus contain details, logs, focus, interrupt, finish, and close actions. Returning from details or logs preserves the task menu; returning to the list preserves the selection and scroll position. Errors return to the same menu.
 - The first list entry toggles the main-page overview. This preference is saved per parent Pi session.
 - Closed tasks retain their results and logs. BTW conversations remain manageable here.
-- Completed, open agents show **Completed · awaiting delivery** or **Delivered · awaiting close**. Delivery requires a persisted parent-session receipt matching the latest turn; merely queuing a message or delivering an earlier turn does not count. Delivery does not confirm review. Task menus and details explain this distinction. These labels follow the UI language and refresh when you reopen or navigate the overlay, without extra timers or model wakeups. A completed agent stays in the main-page list until its pane is closed, because closing it is what you do next.
+- Completed, open agents show **Completed · awaiting delivery** or **Delivered · awaiting close**. Delivery requires a persisted parent-session receipt matching the latest turn; merely queuing a message or delivering an earlier turn does not count. Delivery does not confirm review. Task menus and details explain this distinction. These labels follow the UI language and refresh when you reopen or navigate the panels, without extra timers or model wakeups. A completed agent stays in the main-page list until its pane is closed, because closing it is what you do next.
 - An uncertain launch without a block ID does not offer unusable focus or close actions. After checking Rex and verifying that the resource is absent and the related process has stopped, use **Confirm resource removed…** to repair the record. This does not send a close or kill command. A connection failure alone is not evidence that a resource is gone.
-- Queries, details, and action errors stay in overlays. Creating a task gives brief status-bar feedback instead of a JSON dump in the main conversation.
+- Queries and details stay in inline panels. Action errors are status-line messages, not a panel to dismiss, so a failed action never puts anything between you and the task list. Creating a task gives brief status-bar feedback instead of a JSON dump in the main conversation.
 
-Only `/btw`, `/bg`, `/rex-agent`, and `/rex-tasks` are registered in the parent. The child also has `/btw-return`. Separate panel, overview, focus, interrupt, close, and log slash commands are consolidated into the overlay.
+Only `/btw`, `/bg`, `/rex-agent`, and `/rex-tasks` are registered in the parent. The child also has `/btw-return`. Separate panel, overview, focus, interrupt, close, and log slash commands are consolidated into this one panel.
 
 The overview reflects the child's last reported activity. Opening it does not inspect every Rex block. Failed automatic shell cleanup is shown in the task manager and retried in the background. Cleanup runs in a separate serial queue; model turn boundaries never wait for Rex CLI calls or disk scans.
 
@@ -307,7 +308,7 @@ Parent Pi → task record → Rex block → Pi (Agent / BTW)
 
 Agent and BTW panes start Pi directly. A short-lived `env` invocation sets the task directory and PATH, then replaces itself with Pi; there is no adapter Node supervisor in these panes. Pi owns its terminal title and native `app=pi` status. Shell keeps its runner for full logs, terminal output, backpressure, and process-group cancellation. Existing children keep their launch architecture until closed and recreated.
 
-While direct Pi panes exist, the parent maintains one Rex event subscription per Rex session. Terminal exit events persist `exit.json`; block closure updates the task record. Initial subscription, newly added tasks, and reconnection reconcile `process.last_exit`, with recovery queries serialized per session. This does not add a recurring process polling loop or block model boundaries. Reload/session shutdown releases the subscription without closing children; reconnection uses bounded backoff.
+While direct Pi panes exist, the parent maintains one Rex event subscription per Rex session. Terminal exit events persist `exit.json`; block closure updates the task record. Initial subscription, newly added tasks, and reconnection reconcile `process.last_exit`, with recovery queries serialized per session. This does not add a recurring process polling loop or block model boundaries. Reload or a session switch releases the subscription without closing children; quitting closes an agent whose report was already delivered and whose Pi is idle, unless `closeFinishedAgentsOnExit` is false. Reconnection uses bounded backoff.
 
 If a direct Pi block disappeared while the parent was offline and Rex no longer has its exit status, recovery records `closed` with `exit.unknown=true` and an explanatory error. It retains a previously completed idle handoff; an unfinished task becomes `exited`, without inventing success or leaving it running forever. A retained block's known exit code is recovered normally. BTW exit events update history only; conclusions still require `/btw-return`.
 
@@ -339,7 +340,7 @@ npm run check
 npm pack --dry-run
 ```
 
-The regression suite covers CLI arguments, context snapshots, interactive Pi startup, real shell success and failure, bounded result payloads, batching and deduplication, ownership, cancellation, close races, layout overflow and restoration, BTW reuse and input confirmation, task overlays, cleanup after delivery, and manual recovery. It also covers slow-terminal backpressure, log failures, process-group termination, configuration precedence, language switching, and configurable pane limits. Registration has been checked with the Pi 1.4.0 extension loader.
+The regression suite covers CLI arguments, context snapshots, interactive Pi startup, real shell success and failure, bounded result payloads, batching and deduplication, ownership, cancellation, close races, layout overflow and restoration, BTW reuse and input confirmation, task panels, cleanup after delivery, and manual recovery. It also covers slow-terminal backpressure, log failures, process-group termination, configuration precedence, language switching, and configurable pane limits. Registration has been checked with the Pi 1.4.0 extension loader.
 
 A real Rex shell smoke test verifies the command header, title, native working/done status, stdout/stderr, and Python output arriving before process exit, with display text excluded from retained logs. An isolated real Rex test also verifies direct Agent/BTW startup in English and Chinese, native Pi identity, startup failure, block closure, and recovery of exits and removed panes after the parent reconnects. Broader layout and focus scenarios still need end-to-end verification. Suggested smoke tests inside Rex:
 

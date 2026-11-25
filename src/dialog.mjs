@@ -34,9 +34,9 @@ export function cellWidth(text) {
   }
   return width;
 }
-// Truncate to a display width without collapsing internal runs of spaces, so an
-// inline hint keeps the gaps that make "Enter Confirm" readable. The overlay
-// path goes through `fit` instead, which normalises whitespace by design.
+// Truncate to a display width without collapsing internal runs of spaces, so a
+// hint keeps the gaps that make "Enter to select" readable. Viewer text goes
+// through `fit` instead, which normalises whitespace by design.
 export function clip(value, width) {
   const clean = stripVTControlCharacters(String(value ?? '')).replace(/\r\n?/g, ' ')
     .replace(/[\x00-\x09\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, ' ');
@@ -51,12 +51,7 @@ export function clip(value, width) {
   return output + '…';
 }
 
-const rgb = (r, g, b) => ({ kind: 'rgb', r, g, b });
-const palette = { background: rgb(21, 29, 38), border: rgb(79, 103, 125),
-  title: rgb(177, 198, 216), text: rgb(205, 215, 225), hint: rgb(140, 157, 174),
-  selected: rgb(40, 60, 79), selectedText: rgb(227, 237, 246) };
-
-// Chord matching for the one shortcut an overlay can own without registering a
+// Chord matching for the one shortcut a panel can own without registering a
 // global keybinding. This package has no dependencies, so Pi's Keymap is not
 // available here; only `ctrl+<letter>` is understood, in the three encodings a
 // terminal may send: the legacy control byte (ctrl+n is 0x0e), Kitty CSI-u
@@ -75,53 +70,83 @@ export function matchesChord(data, chord) {
   return Boolean(xterm) && Number(xterm[2]) === code && Number(xterm[1]) === CONTROL_MODIFIER;
 }
 
-// One native Pi overlay for menus and scrollable text. Never appends messages
-// or notifications to the transcript. Uses Pi's configured keybindings.
-export function dialogComponent({ tui, theme, keys, done, title, choices, text, description = '', state = {},
-  language = 'en' }) {
+// One inline panel for menus and scrollable text, in the chrome Pi's own
+// pickers use: a `─` rule at each end, an accent title, a `→` cursor, muted
+// detail and a dim hint line. It is a `ctx.ui.custom` component with no overlay
+// options, so it takes over the editor area instead of floating over the
+// transcript, and it paints with the theme's tokens so it follows the active
+// theme like the rest of Pi. Never appends messages or notifications.
+export function panelComponent({ tui, theme, keys, done, title = '', choices, text, description = '',
+  state = {}, language = 'en' }) {
   let selected = Math.max(0, choices?.findIndex(item => item.value === state.value) ?? 0);
   let offset = state.offset || 0, capacity = 10, lineCount = 0, closed = false;
+  const fg = (token, value) => (theme?.fg ? theme.fg(token, value) : value);
+  const bold = value => (theme?.bold ? theme.bold(value) : value);
   const remember = () => { state.value = choices?.[selected]?.value; state.offset = offset; };
   const finish = value => {
     if (closed) return;
     closed = true; remember(); done(value);
   };
-  const paint = (value, color = 'text', selected = false, bold = false) => theme?.style
-    ? theme.style(value, { fg: palette[color], bg: selected ? palette.selected : palette.background, bold }) : value;
   const match = (data, action) => keys.matches(data, `tui.select.${action}`);
   return {
     focused: true,
     render(width) {
       if (width <= 0) return [];
-      const height = Math.max(5, Math.floor((tui.terminal?.rows || 24) * 0.8));
-      const framed = width >= 6;
-      const inner = framed ? width - 2 : width;
-      const padding = width >= 32 ? 2 : framed ? 1 : 0;
-      const contentWidth = Math.max(1, inner - padding * 2);
-      const roomy = height >= 12 && width >= 32;
-      const intro = description ? wrapText(description, contentWidth).slice(0, roomy ? 2 : 1) : [];
-      capacity = Math.max(1, height - 4 - (roomy ? 3 : 0) - intro.length);
-      const body = choices ? choices.map((item, i) => `${i === selected ? '›' : ' '} ${plain(item.label)}`)
-        : wrapText(text, contentWidth);
+      // Compose each line from (text, token) segments, trimming only the segment
+      // that overflows so the width helpers never see an escape sequence.
+      const compose = segments => {
+        let out = '', left = width;
+        for (const [value, token] of segments) {
+          if (left <= 0 || !value) continue;
+          const part = cellWidth(value) <= left ? value : clip(value, left);
+          out += typeof token === 'function' ? token(part) : token ? fg(token, part) : part;
+          left -= cellWidth(part);
+        }
+        return out;
+      };
+      const gutterWidth = width >= 24 ? 2 : 1;
+      const gutter = ' '.repeat(gutterWidth);
+      const roomy = width >= 32;
+      const introWidth = Math.max(1, width - gutterWidth);
+      const intro = description ? wrapText(description, introWidth).slice(0, roomy ? 2 : 1) : [];
+      // Rule, title, description, blank, body…, blank, hint, rule. A short
+      // terminal drops description lines before it drops body rows.
+      const height = Math.max(8, tui.terminal?.rows || 24);
+      while (intro.length && 8 + intro.length > height) intro.pop();
+      capacity = Math.max(1, height - 7 - intro.length);
+      const body = choices
+        ? choices.map(item => ({ label: plain(item.label), detail: item.detail ? plain(item.detail) : '' }))
+        : wrapText(text, Math.max(1, width - gutterWidth));
       lineCount = body.length;
-      if (choices) offset = Math.max(0, Math.min(offset, selected));
-      if (choices && selected >= offset + capacity) offset = selected - capacity + 1;
+      if (choices) {
+        selected = Math.max(0, Math.min(choices.length - 1, selected));
+        if (selected >= offset + capacity) offset = selected - capacity + 1;
+      }
       offset = Math.max(0, Math.min(offset, Math.max(0, lineCount - capacity)));
       remember();
-      const row = (value = '', color = 'text', highlighted = false, bold = false) => {
-        // Viewer lines are already wrapped; preserve their code/log indentation.
-        const clipped = cellWidth(value) <= contentWidth ? value : fit(value, contentWidth);
-        const padded = ' '.repeat(padding) + clipped + ' '.repeat(Math.max(0, inner - padding - cellWidth(clipped)));
-        return (framed ? paint('│', 'border') : '') + paint(padded, color, highlighted, bold) + (framed ? paint('│', 'border') : '');
-      };
-      const edge = (left, right) => paint(framed ? left + '─'.repeat(inner) + right : '─'.repeat(width), 'border');
-      const visible = body.slice(offset, offset + capacity).map((line, i) =>
-        row(line, choices && offset + i === selected ? 'selectedText' : 'text', Boolean(choices && offset + i === selected)));
-      const hint = choices ? t(language, 'selectHint')
-        : `${t(language, 'scrollHint')}   ${Math.min(offset + 1, lineCount)}/${lineCount}`;
-      return [edge('╭', '╮'), ...(roomy ? [row()] : []), row(plain(title), 'title', false, true),
-        ...intro.map(line => row(line, 'hint')), ...(roomy ? [row()] : []), ...visible,
-        ...(roomy ? [row()] : []), row(fit(hint, contentWidth), 'hint'), edge('╰', '╯')];
+      const visible = body.slice(offset, offset + capacity).map((line, index) => {
+        if (!choices) return compose([[gutter], [line]]);
+        const highlight = offset + index === selected;
+        return compose([[gutter], [highlight ? '→ ' : '  ', highlight ? 'accent' : undefined],
+          [line.label, highlight ? 'accent' : undefined],
+          ...(line.detail ? [[` · ${line.detail}`, 'muted']] : [])]);
+      });
+      // Pi's own hint idiom: the wording dim, the position muted.
+      const hint = t(language, choices ? 'selectHint' : 'scrollHint');
+      const position = lineCount > capacity ? `${Math.min(offset + 1, lineCount)}/${lineCount}` : '';
+      const positionWidth = position ? cellWidth(position) + 1 : 0;
+      const hintText = clip(hint, Math.max(0, width - gutterWidth - positionWidth));
+      const hintLine = compose([[gutter], [hintText, 'dim'],
+        ...(position ? [[' '.repeat(Math.max(1, width - gutterWidth - cellWidth(hintText) - cellWidth(position)))],
+          [position, 'muted']] : [])]);
+      return [fg('border', '─'.repeat(width)),
+        compose([[' '], [plain(title), text => fg('accent', bold(text))]]),
+        ...intro.map(line => compose([[gutter], [line, 'muted']])),
+        '',
+        ...visible,
+        '',
+        hintLine,
+        fg('border', '─'.repeat(width))];
     },
     handleInput(data) {
       if (closed) return;
@@ -140,9 +165,10 @@ export function dialogComponent({ tui, theme, keys, done, title, choices, text, 
     invalidate() {},
   };
 }
+
 // The side-conversation picker, styled the way Pi's own model picker is: theme
-// border rules and a `→` cursor, no overlay box and no background fill. Kept
-// out of `dialogComponent` so the task-manager overlay can be restyled alone.
+// border rules and a `→` cursor, no box and no background fill. Kept out of
+// `panelComponent` so the task manager's rows can be restyled alone.
 export function nativePickerComponent({ tui, theme, keys, done, title = '', choices = [], canCreate = false,
   state = {}, language = 'en', hotkeys }) {
   let selected = Math.max(0, choices.findIndex(choice => choice.value === state.value));
@@ -221,34 +247,28 @@ export function nativePickerComponent({ tui, theme, keys, done, title = '', choi
 
 export function createDialogs(getLanguage = () => 'en') {
   const dismissals = new Set();
-  const show = async (ctx, config) => {
+  // Every panel is inline, like Pi's own pickers: the component owns the editor
+  // area and no overlay options are passed, so nothing floats over the
+  // transcript and nothing paints its own opaque background.
+  const open = async (ctx, build) => {
     if (!ctx.hasUI) return;
     let dismiss;
     try {
       return await ctx.ui.custom((tui, theme, keys, done) => {
-        const component = dialogComponent({ tui, theme, keys, done, language: getLanguage(), ...config });
-        dismiss = () => component.close(); dismissals.add(dismiss);
-        return component;
-      }, { overlay: true, overlayOptions: { width: 84, maxHeight: '80%', anchor: 'center', margin: 1 } });
-    } finally { dismissals.delete(dismiss); }
-  };
-  // Inline custom UI, like Pi's own pickers: it owns the editor area, so there
-  // are no overlay options to pass.
-  const showNative = async (ctx, config) => {
-    if (!ctx.hasUI) return;
-    let dismiss;
-    try {
-      return await ctx.ui.custom((tui, theme, keys, done) => {
-        const component = nativePickerComponent({ tui, theme, keys, done, language: getLanguage(), ...config });
+        const component = build({ tui, theme, keys, done, language: getLanguage() });
         dismiss = () => component.close(); dismissals.add(dismiss);
         return component;
       });
     } finally { dismissals.delete(dismiss); }
   };
   return {
-    select: (ctx, title, choices, options = {}) => show(ctx, { title, choices, ...options }),
-    pick: (ctx, choices, options = {}) => showNative(ctx, { choices, ...options }),
-    view: (ctx, title, text) => show(ctx, { title, text }),
+    select: (ctx, title, choices, options = {}) =>
+      open(ctx, config => panelComponent({ ...config, title, choices, ...options })),
+    // The side-conversation picker keeps its own chrome: a rule, an accent
+    // title and a `Selected:` footer, matching Pi's model picker line for line.
+    pick: (ctx, choices, options = {}) =>
+      open(ctx, config => nativePickerComponent({ ...config, choices, ...options })),
+    view: (ctx, title, text) => open(ctx, config => panelComponent({ ...config, title, text })),
     closeAll() { for (const dismiss of dismissals) dismiss(); dismissals.clear(); },
   };
 }

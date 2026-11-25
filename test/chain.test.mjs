@@ -20,6 +20,8 @@ function fakeRex() {
   const calls = { open: [], control: [], inspect: [] };
   let blocks = 0;
   return { calls,
+    // Current Rex sets only REX_BLOCK, so the launch asks which session holds it.
+    async session() { return 'session:parent'; },
     async open(run) {
       calls.open.push({ name: run.name, task: run.task, model: run.model, thinking: run.thinking, chain: run.chain, role: run.role, tools: run.tools });
       const id = `block-${++blocks}`;
@@ -336,6 +338,21 @@ test('a failed first launch leaves a terminal chain, not a running one', async t
   assert.equal(chain.steps[0].status, 'failed');
   assert.match(chain.steps[0].error, /Start Pi inside Rex/);
   assert.equal(h.boundary(), undefined, 'the tool call already reported the failure');
+});
+
+test('a launch with only REX_BLOCK takes the session rex reports for the pane', async t => {
+  const client = fakeRex();
+  const saved = [process.env.REX_SESSION, process.env.REX_BLOCK];
+  delete process.env.REX_SESSION;
+  process.env.REX_BLOCK = 'block:parent';
+  t.after(() => { if (saved[0] !== undefined) process.env.REX_SESSION = saved[0]; if (saved[1] !== undefined) process.env.REX_BLOCK = saved[1]; });
+  const h = await fixture(t, client);
+  const response = await h.call('subagent', { task: 'Map the auth flow', label: 'Map the auth flow', name: 'auth-research' });
+  const result = JSON.parse(response.content[0].text);
+  assert.equal(result.status, 'running', 'the launch is not refused for want of REX_SESSION');
+  const record = JSON.parse(await readFile(join(h.root, response.details.id, 'run.json'), 'utf8'));
+  assert.equal(record.rexSession, 'session:parent', 'later commands target the session that holds the pane');
+  assert.equal(record.anchor, 'block:parent');
 });
 
 test('a step line marks a cut sentence and does not repeat the state as a reason', () => {

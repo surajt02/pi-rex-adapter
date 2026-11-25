@@ -47,6 +47,17 @@ export async function rexExecutable(env = process.env) {
 export class Rex {
   constructor(binary, run = exec) { this.binary = binary; this.run = run; }
   async json(args, signal) { signal?.throwIfAborted(); return JSON.parse(await this.run(this.binary, args, signal)); }
+  // Current Rex sets only REX_BLOCK in a terminal, so the session that holds the
+  // pane is asked for once and remembered. A failed ask leaves it unset to retry.
+  async session(signal) {
+    signal?.throwIfAborted();
+    if (this.sessionId === undefined) {
+      const whoami = await this.json(['whoami', '--json'], signal);
+      if (typeof whoami?.session_id !== 'string') throw new Error('Rex did not report the session holding this pane.');
+      this.sessionId = whoami.session_id;
+    }
+    return this.sessionId;
+  }
   async open(manifest, runner, signal) {
     signal?.throwIfAborted();
     const layout = manifest.layout;
